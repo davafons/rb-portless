@@ -16,17 +16,24 @@ module Portless
     end
 
     def run
-      return print_version if flag?("--version", "-v")
-      return print_help if @argv.empty? || flag?("--help", "-h")
+      first = @argv.first
+      return print_version if %w[--version -v].include?(first)
+      return print_help if @argv.empty? || %w[--help -h].include?(first)
 
-      command = @argv.first
-      command = "run" unless COMMANDS.include?(command)
-      send("cmd_#{command}", rest(command))
+      if COMMANDS.include?(first)
+        return command_help(first) if %w[--help -h].include?(@argv[1])
+
+        send("cmd_#{first}", rest(first))
+      elsif first.start_with?("--")
+        cmd_run(@argv)        # leading flags (incl. --name) → run mode
+      else
+        cmd_named(@argv)      # `rb-portless <name> <command…>` shorthand
+      end
     rescue Portless::NonInteractiveError => e
-      warn "rb-portless: #{e.message}"
+      warn error_line(e.message)
       exit 2
     rescue Portless::Error => e
-      warn "rb-portless: #{e.message}"
+      warn error_line(e.message)
       exit 1
     end
 
@@ -42,54 +49,73 @@ module Portless
       end
     end
 
-    # Consume leading rb-portless flags (--lan/--ip/--ngrok/--tailscale/--funnel),
-    # stopping at the first non-flag, an unknown flag, or `--`; the rest is the
-    # command to run.
+    # `rb-portless <name> <command…>`: run the command under the hostname <name>
+    # (portless's named-app shorthand). The first non-flag token is the name.
+    def cmd_named(args)
+      options, rest = parse_run(args)
+      name = rest.shift
+      if rest.empty?
+        raise Error, "no command given — try `rb-portless run #{name}` or `rb-portless #{name} <command>`"
+      end
+
+      options[:name] = name
+      Runner.new(command: rest, options: options).run
+    end
+
+    # Pull known flags out of the run args from anywhere before `--` (mirrors
+    # portless's global-flag stripping), leaving the command to execute. Flags:
+    # --lan/--ip, sharing (--ngrok/--tailscale/--funnel), --name, --force,
+    # --app-port. Everything after `--` is the command verbatim.
     def parse_run(args)
       options = {}
-      rest = args.dup
-      while (flag = rest.first)&.start_with?("--")
-        case flag
-        when "--lan"       then options[:lan] = true; rest.shift
-        when "--ip"        then rest.shift; options[:ip] = rest.shift
-        when "--ngrok"     then options[:ngrok] = true; rest.shift
-        when "--tailscale" then options[:tailscale] = true; rest.shift
-        when "--funnel"    then options[:funnel] = true; rest.shift
-        when "--"          then rest.shift; break
-        else break
+      command = []
+      i = 0
+      while i < args.length
+        case args[i]
+        when "--"          then command.concat(args[i + 1..]); break
+        when "--lan"       then options[:lan] = true
+        when "--ip"        then options[:ip] = args[i += 1]
+        when "--ngrok"     then options[:ngrok] = true
+        when "--tailscale" then options[:tailscale] = true
+        when "--funnel"    then options[:funnel] = true
+        when "--force"     then options[:force] = true
+        when "--name"      then options[:name] = args[i += 1]
+        when "--app-port"  then options[:app_port] = parse_port!(args[i += 1], "--app-port")
+        else command << args[i]
         end
+        i += 1
       end
-      [ options, rest ]
+      [ options, command ]
     end
 
     def cmd_proxy(args)
-      action = args.first
-      case action
+      case args.first
       when "start"
         Daemon.start(tls: tls_flag(args), port: int_flag(args, "--port"), foreground: flag?("--foreground"))
-      when "stop"
-        Daemon.stop
-      else
-        warn "usage: rb-portless proxy start|stop"
-        exit 1
+      when "stop" then Daemon.stop
+      when nil    then command_help("proxy")
+      else invalid_action!("proxy start|stop")
       end
     end
 
     def cmd_trust(_args)
       if Trust.trusted?
-        puts "rb-portless: CA already trusted"
+        info "CA already trusted"
       else
         Trust.install!
-        puts "rb-portless: local CA trusted"
+        ok "local CA trusted"
       end
     end
 
     def cmd_list(_args)
       routes = RouteStore.new.routes
-      if routes.empty?
-        puts "rb-portless: no active routes"
-      else
-        routes.each { |r| puts format("%-40s → :%d", r.hostname, r.port) }
+      return puts(Colors.dim("rb-portless: no active routes")) if routes.empty?
+
+      routes.each do |r|
+        tag = r.alias? ? "alias" : "pid #{r.pid}"
+        puts "#{Colors.cyan(r.hostname.ljust(40))} → :#{r.port}  #{Colors.dim("(#{tag})")}"
+        puts "    #{Colors.dim('↳ tailnet')} #{Colors.green(r.tailscale)}" if r.tailscale
+        puts "    #{Colors.dim('↳ ngrok  ')} #{Colors.green(r.ngrok)}" if r.ngrok
       end
     end
 
@@ -98,40 +124,46 @@ module Portless
       when "sync"
         hostnames = RouteStore.new.routes.map(&:hostname).uniq
         with_hosts_write([ "hosts", "sync" ]) { Hosts.sync(hostnames) }
-        puts "rb-portless: synced #{hostnames.size} host(s) to #{Hosts.file}"
+        ok "synced #{hostnames.size} host(s) to #{Hosts.file}"
       when "clean"
         with_hosts_write([ "hosts", "clean" ]) { Hosts.clean }
-        puts "rb-portless: cleaned #{Hosts.file}"
-      else
-        warn "usage: rb-portless hosts sync|clean"
-        exit 1
+        ok "cleaned #{Hosts.file}"
+      when nil then command_help("hosts")
+      else invalid_action!("hosts sync|clean")
       end
     end
 
     def cmd_alias(args)
       if args.first == "--remove"
         name = args[1] or abort_usage("alias --remove <name>")
-        RouteStore.new.remove(hostname_for(name))
-        puts "rb-portless: removed alias #{hostname_for(name)}"
+        host = hostname_for(name)
+        raise Error, "no alias found for #{host}" unless RouteStore.new.remove(host, owner_pid: 0)
+        ok "removed alias #{host}"
       else
-        name, port = args
-        abort_usage("alias <name> <port>") unless name && port
-        RouteStore.new.add(hostname: hostname_for(name), port: Integer(port), pid: 0, force: true)
-        puts "rb-portless: #{hostname_for(name)} → :#{port}"
+        name, port = args.reject { |a| a.start_with?("--") }
+        abort_usage("alias <name> <port> [--force]") unless name && port
+        host = hostname_for(name)
+        port = parse_port!(port, "port")
+        RouteStore.new.add(hostname: host, port: port, pid: 0, force: args.include?("--force"))
+        ok "#{host} → :#{port}"
       end
     end
 
     def cmd_get(args)
-      name = args.first or abort_usage("get <name>")
+      worktree = !args.include?("--no-worktree")
+      name = args.find { |a| !a.start_with?("--") } or abort_usage("get <name> [--no-worktree]")
       config = Config.load
-      puts "#{config.tls ? 'https' : 'http'}://#{hostname_for(name)}"
+      host = hostname_for(name)
+      host = "#{config.worktree_prefix}.#{host}" if worktree && config.worktree_prefix
+      puts "#{config.tls ? 'https' : 'http'}://#{host}"
     end
 
-    def cmd_prune(_args)
-      store = RouteStore.new
-      before = store.routes.size
-      store.prune
-      puts "rb-portless: pruned #{before - store.routes.size} stale route(s)"
+    def cmd_prune(args)
+      force = args.include?("--force")
+      pruned = RouteStore.new.prune
+      killed = pruned.sum { |r| PortOwner.kill(r.port, force: force) }
+      note = killed.positive? ? ", killed #{killed} orphan process(es)" : ""
+      ok "pruned #{pruned.size} stale route(s)#{note}"
     end
 
     def cmd_clean(_args)
@@ -140,10 +172,13 @@ module Portless
       begin; with_hosts_write([ "hosts", "clean" ]) { Hosts.clean }; rescue StandardError; end
       require "fileutils"
       FileUtils.rm_rf(State.dir)
-      puts "rb-portless: removed all state"
+      ok "removed all state"
     end
 
-    def cmd_doctor(_args)
+    def cmd_doctor(args)
+      extra = args.reject { |a| %w[--help -h].include?(a) }
+      raise Error, "unknown argument #{extra.first.inspect}" unless extra.empty?
+
       port = Health.discover_port
       routes = RouteStore.new.routes
       report = [
@@ -151,12 +186,14 @@ module Portless
         [ "state dir", File.directory?(State.dir), State.dir ],
         [ "proxy running", !port.nil?, port ? "on :#{port}" : "not running" ],
         [ "CA generated", File.exist?(State.ca_cert), nil ],
-        [ "CA trusted", safe { Trust.trusted? }, Constants::MACOS ? nil : "macOS only for now" ],
+        [ "CA trusted", safe { Trust.trusted? }, safe { Trust.trusted? } ? nil : "run `rb-portless trust`" ],
         [ "routes", true, "#{routes.size} active" ]
       ]
-      report.each do |label, ok, note|
-        puts "  #{ok ? '✓' : '✗'} #{label}#{note ? " — #{note}" : ''}"
+      report.each do |label, pass, note|
+        mark = pass ? Colors.green("✓") : Colors.red("✗")
+        puts "  #{mark} #{label}#{note ? " — #{Colors.dim(note)}" : ''}"
       end
+      exit 1 if report.any? { |_label, pass, _note| !pass }
     end
 
     def cmd_service(args)
@@ -164,9 +201,8 @@ module Portless
       when "install" then Service.install(tls: tls_flag(args), port: int_flag(args, "--port"))
       when "uninstall" then Service.uninstall
       when "status" then Service.status
-      else
-        warn "usage: rb-portless service install|uninstall|status"
-        exit 1
+      when nil then command_help("service")
+      else invalid_action!("service install|uninstall|status")
       end
     end
 
@@ -189,9 +225,22 @@ module Portless
     end
 
     def abort_usage(usage)
-      warn "usage: rb-portless #{usage}"
+      warn error_line("usage: rb-portless #{usage}")
       exit 1
     end
+
+    # An *unknown* sub-action is an error (exit 1); a bare subcommand prints its
+    # help and exits 0 (handled by the `when nil` arms). Mirrors portless's
+    # `exit(help || !args[1] ? 0 : 1)`.
+    def invalid_action!(usage)
+      warn error_line("usage: rb-portless #{usage}")
+      exit 1
+    end
+
+    # ── Output (colour no-ops when not a TTY / NO_COLOR) ──────────────────
+    def ok(msg)   = puts Colors.green("rb-portless: #{msg}")
+    def info(msg) = puts "rb-portless: #{msg}"
+    def error_line(msg) = Colors.red("rb-portless: #{msg}", io: $stderr)
 
     # ── Flag helpers ──────────────────────────────────────────────────────
     def tls_flag(args)
@@ -203,6 +252,14 @@ module Portless
     def int_flag(args, name)
       i = args.index(name)
       i ? Integer(args[i + 1], exception: false) : nil
+    end
+
+    # Parse + validate a port in 1–65535, with a clean error (never a backtrace).
+    def parse_port!(value, label)
+      port = Integer(value.to_s, exception: false)
+      raise Error, "invalid #{label} #{value.inspect} — must be 1-65535" unless port&.between?(1, 65_535)
+
+      port
     end
 
     def rest(command)
@@ -217,26 +274,85 @@ module Portless
 
     def print_help
       puts <<~HELP
-        rb-portless #{Portless::VERSION} — named .localhost URLs for local dev
+        #{Colors.bold("rb-portless #{Portless::VERSION}")} — named .localhost URLs for local dev
 
-        Usage:
+        #{Colors.blue('Usage:')}
           rb-portless run <command>        run a dev server through the proxy
           rb-portless run                  run the `apps` map, or the dev script
+          rb-portless <name> <command>     run <command> at https://<name>.localhost
+          rb-portless get <name>           print a service's URL (--no-worktree)
+          rb-portless alias <name> <port>  static route for an unmanaged service
           rb-portless proxy start|stop     manage the proxy daemon
           rb-portless trust                trust the local CA (HTTPS)
           rb-portless hosts sync|clean     manage /etc/hosts (Safari fallback)
           rb-portless list                 show active routes
           rb-portless doctor               diagnose setup
-          rb-portless clean | prune        tear down / reap orphans
+          rb-portless clean | prune        tear down / reap orphans (--force kills)
           rb-portless service install      bind the privileged port at boot
 
-        run flags:
+        #{Colors.blue('run flags:')}
+          --name <name>                    override the inferred hostname
+          --app-port <n>                   fix the backend port (else auto)
+          --force                          take over a route owned by another run
           --lan [--ip <addr>]              also serve on the LAN (<name>.local)
           --ngrok                          share publicly via ngrok
           --tailscale | --funnel           share via your tailnet / Funnel
 
+        In a linked git worktree on a non-default branch, the branch name is
+        prepended as a subdomain (auth.<name>.localhost). PORTLESS=0 runs the
+        command directly without the proxy.
+
         HTTPS is the default (https://<name>.localhost). Config: portless.json.
       HELP
+    end
+
+    # Per-command help (`rb-portless <cmd> --help`, or a bare subcommand). Kept
+    # as plain data so the renderer can colourise it for the terminal.
+    HELP = {
+      "run"     => { summary: "Run a dev server through the proxy.",
+                     usage: [ "run <command>", "run   (the apps map, or bin/dev / bin/rails server)" ],
+                     flags: [ [ "--name <name>", "override the inferred hostname" ],
+                              [ "--app-port <n>", "fix the backend port (else auto)" ],
+                              [ "--force", "take over a route held by another run" ],
+                              [ "--lan [--ip <addr>]", "also serve on the LAN" ],
+                              [ "--ngrok | --tailscale | --funnel", "share publicly" ] ],
+                     example: "rb-portless run bin/dev" },
+      "get"     => { summary: "Print a service's URL (for scripts / env vars).",
+                     usage: [ "get <name> [--no-worktree]" ],
+                     flags: [ [ "--no-worktree", "skip the git-worktree subdomain prefix" ] ],
+                     example: "DB_URL=$(rb-portless get db)" },
+      "alias"   => { summary: "Static route for a service portless doesn't manage.",
+                     usage: [ "alias <name> <port> [--force]", "alias --remove <name>" ],
+                     flags: [ [ "--force", "overwrite an existing route" ] ],
+                     example: "rb-portless alias postgres 5432   # -> https://postgres.localhost" },
+      "proxy"   => { summary: "Manage the proxy daemon.",
+                     usage: [ "proxy start [--no-tls] [--port <n>]", "proxy stop" ] },
+      "trust"   => { summary: "Trust the local CA so HTTPS works without warnings.",
+                     usage: [ "trust" ] },
+      "hosts"   => { summary: "Manage the /etc/hosts block (Safari / non-.localhost TLDs).",
+                     usage: [ "hosts sync", "hosts clean" ] },
+      "list"    => { summary: "Show active routes.", usage: [ "list" ] },
+      "doctor"  => { summary: "Diagnose the setup (read-only).", usage: [ "doctor" ] },
+      "clean"   => { summary: "Remove all state: stop proxy, untrust CA, clear routes & hosts.",
+                     usage: [ "clean" ] },
+      "prune"   => { summary: "Reap routes whose owner died; kill the orphaned dev server.",
+                     usage: [ "prune [--force]" ],
+                     flags: [ [ "--force", "SIGKILL the orphan instead of SIGTERM" ] ] },
+      "service" => { summary: "Install the proxy as an OS startup service (binds 443 at boot).",
+                     usage: [ "service install [--no-tls] [--port <n>]", "service uninstall", "service status" ] }
+    }.freeze
+
+    def command_help(name)
+      h = HELP.fetch(name)
+      out = [ "", "  #{Colors.bold("rb-portless #{name}")} — #{h[:summary]}", "", "  #{Colors.blue('Usage:')}" ]
+      h[:usage].each { |u| out << "    #{Colors.cyan("rb-portless #{u}")}" }
+      if h[:flags]
+        out << "" << "  #{Colors.blue('Flags:')}"
+        h[:flags].each { |flag, desc| out << "    #{Colors.cyan(flag.ljust(34))} #{desc}" }
+      end
+      out << "" << "  #{Colors.dim("Example: #{h[:example]}")}" if h[:example]
+      out << ""
+      puts out.join("\n")
     end
   end
 end
