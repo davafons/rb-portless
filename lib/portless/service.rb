@@ -18,22 +18,22 @@ module Portless
       return elevate([ "service", "install", "--port", port.to_s, tls ? "--tls" : "--no-tls" ]) unless privileged_ok?
 
       Constants::MACOS ? install_launchd(port, tls) : install_systemd(port, tls)
-      puts "portless-rb: boot service installed (binds :#{port})"
+      puts "rb-portless: boot service installed (binds :#{port})"
     end
 
     def uninstall
       return elevate([ "service", "uninstall" ]) unless privileged_ok?
 
       Constants::MACOS ? uninstall_launchd : uninstall_systemd
-      puts "portless-rb: boot service removed"
+      puts "rb-portless: boot service removed"
     end
 
     def status
       if Constants::MACOS
         system("launchctl", "print", "system/#{LABEL}", out: $stdout, err: $stdout) ||
-          puts("portless-rb: service not installed")
+          puts("rb-portless: service not installed")
       else
-        system("systemctl", "status", "portless-rb", out: $stdout, err: $stdout)
+        system("systemctl", "status", "rb-portless", out: $stdout, err: $stdout)
       end
     end
 
@@ -82,21 +82,21 @@ module Portless
     def install_systemd(port, tls)
       File.write(systemd_unit_path, systemd_unit(port, tls))
       system("systemctl", "daemon-reload")
-      system("systemctl", "enable", "--now", "portless-rb") || raise(Error, "systemctl enable failed")
+      system("systemctl", "enable", "--now", "rb-portless") || raise(Error, "systemctl enable failed")
     end
 
     def uninstall_systemd
-      system("systemctl", "disable", "--now", "portless-rb", err: File::NULL)
+      system("systemctl", "disable", "--now", "rb-portless", err: File::NULL)
       File.delete(systemd_unit_path) if File.exist?(systemd_unit_path)
       system("systemctl", "daemon-reload")
     end
 
-    def systemd_unit_path = "/etc/systemd/system/portless-rb.service"
+    def systemd_unit_path = "/etc/systemd/system/rb-portless.service"
 
     def systemd_unit(port, tls)
       <<~UNIT
         [Unit]
-        Description=portless-rb proxy
+        Description=rb-portless proxy
         After=network-online.target
         Wants=network-online.target
 

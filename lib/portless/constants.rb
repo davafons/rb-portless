@@ -5,7 +5,7 @@ module Portless
     # Default location for all coordination state (routes, CA, pid/port markers).
     # Mirrors portless's ~/.portless; State.dir reads PORTLESS_STATE_DIR at call
     # time to allow per-run overrides (tests, the sudo'd daemon).
-    DEFAULT_STATE_DIR = "~/.portless-rb"
+    DEFAULT_STATE_DIR = "~/.rb-portless"
 
     # Default proxy ports: 443 for HTTPS (the default), 80 for --no-tls. When the
     # privileged port can't be bound (sudo denied), we fall back to 1355.
@@ -26,11 +26,11 @@ module Portless
 
     # The marker every proxied response carries, so we can tell *our* proxy from
     # any other process holding the port (used by the health probe).
-    HEALTH_HEADER = "x-portless-rb"
+    HEALTH_HEADER = "x-rb-portless"
 
     # /etc/hosts managed-block fences (Safari / non-.localhost TLDs).
-    HOSTS_BEGIN = "# portless-rb-start"
-    HOSTS_END = "# portless-rb-end"
+    HOSTS_BEGIN = "# rb-portless-start"
+    HOSTS_END = "# rb-portless-end"
 
     # Reject a dev-server loop that proxies back to us without changing origin.
     MAX_PROXY_HOPS = 5

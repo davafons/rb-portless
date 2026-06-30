@@ -36,7 +36,7 @@ module Portless
     end
 
     # The executable to re-invoke. $PROGRAM_NAME is the exe path (gem wrapper or
-    # exe/portless-rb in dev).
+    # exe/rb-portless in dev).
     def program = $PROGRAM_NAME
 
     def truthy(value) = %w[1 true yes].include?(value.to_s.downcase)

@@ -4,12 +4,12 @@ require "uri"
 
 module Portless
   # The host matchers to whitelist in Rails development, derived from the URL
-  # `portless-rb run` injects (PORTLESS_URL). Plain Ruby so it's testable without
+  # `rb-portless run` injects (PORTLESS_URL). Plain Ruby so it's testable without
   # booting Rails; the Railtie is just glue around it.
   module RailsHosts
     module_function
 
-    # Empty unless we're actually running under portless-rb.
+    # Empty unless we're actually running under rb-portless.
     def allowed(portless_url = ENV["PORTLESS_URL"])
       return [] if portless_url.to_s.empty?
 

@@ -2,9 +2,9 @@
 # frozen_string_literal: true
 
 begin
-  require "portless-rb"
+  require "rb-portless"
 rescue LoadError
-  require_relative "../lib/portless-rb"
+  require_relative "../lib/rb-portless"
 end
 
 Portless::CLI.start(ARGV)

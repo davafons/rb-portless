@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 module Portless
-  # `portless-rb run <cmd>`: pick a free backend port, inject PORT/HOST, ensure
+  # `rb-portless run <cmd>`: pick a free backend port, inject PORT/HOST, ensure
   # the proxy is up, register the named route, run the child in its own process
   # group (forwarding signals), and deregister on exit. Rails/puma respect PORT
   # natively. Mirrors portless's runApp/spawnCommand.
@@ -14,7 +14,7 @@ module Portless
 
     def run
       command = resolved_command
-      raise Error, "nothing to run — pass a command, e.g. portless-rb run bin/dev" if command.empty?
+      raise Error, "nothing to run — pass a command, e.g. rb-portless run bin/dev" if command.empty?
 
       port = @config.app_port&.to_i || FreePort.find
       command = Frameworks.inject(command, port) # --port/--host for vite/astro/etc.
@@ -64,7 +64,7 @@ module Portless
       }.compact
     end
 
-    # Explicit command wins; bare `portless-rb` falls back to the project's dev
+    # Explicit command wins; bare `rb-portless` falls back to the project's dev
     # runner (bin/dev, then bin/rails server).
     def resolved_command
       return @command unless @command.empty?
@@ -75,7 +75,7 @@ module Portless
     end
 
     def announce(url, port)
-      warn "portless-rb → #{url}  (backend :#{port})"
+      warn "rb-portless → #{url}  (backend :#{port})"
     end
   end
 end

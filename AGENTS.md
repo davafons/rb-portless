@@ -1,4 +1,4 @@
-# AGENTS.md — portless-rb
+# AGENTS.md — rb-portless
 
 A native-Ruby port of Vercel's **portless** (`references/portless`, a Node/TS
 monorepo). Goal: feature parity, HTTPS by default, framework-agnostic (Rails is
@@ -6,13 +6,13 @@ the first test target). This file is the map; read it before changing things.
 
 ## What it does
 
-`portless-rb run <cmd>` runs a dev server through a local reverse proxy reachable
+`rb-portless run <cmd>` runs a dev server through a local reverse proxy reachable
 at `https://<name>.localhost` — no port numbers. A random backend port is
 injected as `PORT`; the proxy routes the named host to it.
 
 ## Core mechanisms (ported from portless — keep these invariants)
 
-- **No daemon IPC.** All coordination is files in `~/.portless-rb` (overridable
+- **No daemon IPC.** All coordination is files in `~/.rb-portless` (overridable
   via `PORTLESS_STATE_DIR`): `routes.json` (host→port→pid) under a `mkdir` lock,
   plus `proxy.pid`/`proxy.port`/CA files. The proxy watches `routes.json`.
 - **Privileged port = re-exec under sudo.** For ports < 1024, re-run the CLI via

@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-# portless-rb — stable, named .localhost URLs for local dev (a native-Ruby port
+# rb-portless — stable, named .localhost URLs for local dev (a native-Ruby port
 # of Vercel's portless). See AGENTS.md for the architecture map.
 require_relative "portless/version"
 require_relative "portless/constants"

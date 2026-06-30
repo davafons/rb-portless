@@ -29,9 +29,9 @@ jobs:
       - name: Build gem
         run: |
           mkdir -p pkg
-          gem build portless-rb.gemspec --output "pkg/portless-rb-${DEV_VERSION}.gem"
+          gem build rb-portless.gemspec --output "pkg/rb-portless-${DEV_VERSION}.gem"
 
       - uses: rubygems/configure-rubygems-credentials@v1.0.0
 
       - name: Push dev gem to RubyGems
-        run: gem push "pkg/portless-rb-${DEV_VERSION}.gem"
+        run: gem push "pkg/rb-portless-${DEV_VERSION}.gem"

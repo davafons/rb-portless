@@ -50,13 +50,13 @@ module Portless
       return elevate if !Privilege.root? && !File.writable?(dir)
 
       require "fileutils"
-      FileUtils.cp(State.ca_cert, File.join(dir, "portless-rb.crt"))
+      FileUtils.cp(State.ca_cert, File.join(dir, "rb-portless.crt"))
       system(*update) || raise(Error, "failed to run #{update.first}")
     end
 
     def uninstall_linux
       dir, update = linux_anchor
-      crt = File.join(dir, "portless-rb.crt")
+      crt = File.join(dir, "rb-portless.crt")
       File.delete(crt) if File.exist?(crt)
       system(*update)
     end

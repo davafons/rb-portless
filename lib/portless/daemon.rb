@@ -36,7 +36,7 @@ module Portless
     def stop
       pid = read_pid
       unless pid
-        warn "portless-rb: no proxy is running"
+        warn "rb-portless: no proxy is running"
         return
       end
 
@@ -50,14 +50,14 @@ module Portless
 
     def start_privileged(port:, tls:)
       unless Privilege.interactive?
-        warn "portless-rb: can't bind :#{port} without a terminal — using :#{Constants::FALLBACK_PROXY_PORT}"
+        warn "rb-portless: can't bind :#{port} without a terminal — using :#{Constants::FALLBACK_PROXY_PORT}"
         return spawn_detached(port: Constants::FALLBACK_PROXY_PORT, tls: tls)
       end
 
       ok = Privilege.reexec_with_sudo([ "proxy", "start", "--port", port.to_s, tls ? "--tls" : "--no-tls" ])
       return wait_until_running(port) if ok
 
-      warn "portless-rb: sudo declined — using :#{Constants::FALLBACK_PROXY_PORT}"
+      warn "rb-portless: sudo declined — using :#{Constants::FALLBACK_PROXY_PORT}"
       spawn_detached(port: Constants::FALLBACK_PROXY_PORT, tls: tls)
     end
 

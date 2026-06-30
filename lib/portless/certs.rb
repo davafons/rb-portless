@@ -9,7 +9,7 @@ module Portless
   # certs aren't honoured at the reserved-TLD boundary, every SNI hostname gets
   # its own leaf, minted on demand and cached on disk + in memory.
   class Certs
-    CA_SUBJECT = "/CN=portless-rb Local CA"
+    CA_SUBJECT = "/CN=rb-portless Local CA"
     CA_DAYS = 3650
     LEAF_DAYS = 365
     CURVE = "prime256v1"

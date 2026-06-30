@@ -46,7 +46,7 @@ module Portless
     def write(content)
       File.write(file, content.gsub(/\n{3,}/, "\n\n"))
     rescue Errno::EACCES
-      raise Error, "writing #{file} needs root — re-run via sudo (portless-rb hosts sync)"
+      raise Error, "writing #{file} needs root — re-run via sudo (rb-portless hosts sync)"
     end
   end
 end

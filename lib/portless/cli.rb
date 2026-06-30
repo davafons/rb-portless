@@ -2,7 +2,7 @@
 
 module Portless
   # Hand-rolled command dispatch (no Thor/optparse ceremony, like portless's
-  # cli.ts). `portless-rb run <cmd>` is the main path; the rest manage the proxy,
+  # cli.ts). `rb-portless run <cmd>` is the main path; the rest manage the proxy,
   # CA trust, hosts file, and diagnostics.
   class CLI
     COMMANDS = %w[run proxy trust hosts list doctor clean prune alias get service].freeze
@@ -23,10 +23,10 @@ module Portless
       command = "run" unless COMMANDS.include?(command)
       send("cmd_#{command}", rest(command))
     rescue Portless::NonInteractiveError => e
-      warn "portless-rb: #{e.message}"
+      warn "rb-portless: #{e.message}"
       exit 2
     rescue Portless::Error => e
-      warn "portless-rb: #{e.message}"
+      warn "rb-portless: #{e.message}"
       exit 1
     end
 
@@ -45,24 +45,24 @@ module Portless
       when "stop"
         Daemon.stop
       else
-        warn "usage: portless-rb proxy start|stop"
+        warn "usage: rb-portless proxy start|stop"
         exit 1
       end
     end
 
     def cmd_trust(_args)
       if Trust.trusted?
-        puts "portless-rb: CA already trusted"
+        puts "rb-portless: CA already trusted"
       else
         Trust.install!
-        puts "portless-rb: local CA trusted"
+        puts "rb-portless: local CA trusted"
       end
     end
 
     def cmd_list(_args)
       routes = RouteStore.new.routes
       if routes.empty?
-        puts "portless-rb: no active routes"
+        puts "rb-portless: no active routes"
       else
         routes.each { |r| puts format("%-40s → :%d", r.hostname, r.port) }
       end
@@ -73,12 +73,12 @@ module Portless
       when "sync"
         hostnames = RouteStore.new.routes.map(&:hostname).uniq
         with_hosts_write([ "hosts", "sync" ]) { Hosts.sync(hostnames) }
-        puts "portless-rb: synced #{hostnames.size} host(s) to #{Hosts.file}"
+        puts "rb-portless: synced #{hostnames.size} host(s) to #{Hosts.file}"
       when "clean"
         with_hosts_write([ "hosts", "clean" ]) { Hosts.clean }
-        puts "portless-rb: cleaned #{Hosts.file}"
+        puts "rb-portless: cleaned #{Hosts.file}"
       else
-        warn "usage: portless-rb hosts sync|clean"
+        warn "usage: rb-portless hosts sync|clean"
         exit 1
       end
     end
@@ -87,12 +87,12 @@ module Portless
       if args.first == "--remove"
         name = args[1] or abort_usage("alias --remove <name>")
         RouteStore.new.remove(hostname_for(name))
-        puts "portless-rb: removed alias #{hostname_for(name)}"
+        puts "rb-portless: removed alias #{hostname_for(name)}"
       else
         name, port = args
         abort_usage("alias <name> <port>") unless name && port
         RouteStore.new.add(hostname: hostname_for(name), port: Integer(port), pid: 0, force: true)
-        puts "portless-rb: #{hostname_for(name)} → :#{port}"
+        puts "rb-portless: #{hostname_for(name)} → :#{port}"
       end
     end
 
@@ -106,7 +106,7 @@ module Portless
       store = RouteStore.new
       before = store.routes.size
       store.prune
-      puts "portless-rb: pruned #{before - store.routes.size} stale route(s)"
+      puts "rb-portless: pruned #{before - store.routes.size} stale route(s)"
     end
 
     def cmd_clean(_args)
@@ -115,7 +115,7 @@ module Portless
       begin; with_hosts_write([ "hosts", "clean" ]) { Hosts.clean }; rescue StandardError; end
       require "fileutils"
       FileUtils.rm_rf(State.dir)
-      puts "portless-rb: removed all state"
+      puts "rb-portless: removed all state"
     end
 
     def cmd_doctor(_args)
@@ -140,7 +140,7 @@ module Portless
       when "uninstall" then Service.uninstall
       when "status" then Service.status
       else
-        warn "usage: portless-rb service install|uninstall|status"
+        warn "usage: rb-portless service install|uninstall|status"
         exit 1
       end
     end
@@ -164,7 +164,7 @@ module Portless
     end
 
     def abort_usage(usage)
-      warn "usage: portless-rb #{usage}"
+      warn "usage: rb-portless #{usage}"
       exit 1
     end
 
@@ -186,7 +186,7 @@ module Portless
     end
 
     def todo(name, desc, _args = nil)
-      warn "portless-rb #{name}: #{desc} — not yet implemented (#{Portless::VERSION})"
+      warn "rb-portless #{name}: #{desc} — not yet implemented (#{Portless::VERSION})"
       exit 1
     end
 
@@ -197,23 +197,23 @@ module Portless
     def flag?(*names) = @argv.any? { |a| names.include?(a) }
 
     def print_version
-      puts "portless-rb #{Portless::VERSION}"
+      puts "rb-portless #{Portless::VERSION}"
     end
 
     def print_help
       puts <<~HELP
-        portless-rb #{Portless::VERSION} — named .localhost URLs for local dev
+        rb-portless #{Portless::VERSION} — named .localhost URLs for local dev
 
         Usage:
-          portless-rb run <command>        run a dev server through the proxy
-          portless-rb [<command>]          (bare) run the project's dev script
-          portless-rb proxy start|stop     manage the proxy daemon
-          portless-rb trust                trust the local CA (HTTPS)
-          portless-rb hosts sync|clean     manage /etc/hosts (Safari fallback)
-          portless-rb list                 show active routes
-          portless-rb doctor               diagnose setup
-          portless-rb clean | prune        tear down / reap orphans
-          portless-rb service install      bind the privileged port at boot
+          rb-portless run <command>        run a dev server through the proxy
+          rb-portless [<command>]          (bare) run the project's dev script
+          rb-portless proxy start|stop     manage the proxy daemon
+          rb-portless trust                trust the local CA (HTTPS)
+          rb-portless hosts sync|clean     manage /etc/hosts (Safari fallback)
+          rb-portless list                 show active routes
+          rb-portless doctor               diagnose setup
+          rb-portless clean | prune        tear down / reap orphans
+          rb-portless service install      bind the privileged port at boot
 
         HTTPS is the default (https://<name>.localhost). Config: portless.json.
       HELP

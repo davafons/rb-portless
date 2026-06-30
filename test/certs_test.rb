@@ -18,7 +18,7 @@ class CertsTest < Minitest::Test
   def test_generates_a_ca
     @certs.ensure_ca!
     ca = @certs.ca_certificate
-    assert_equal "/CN=portless-rb Local CA", ca.subject.to_s
+    assert_equal "/CN=rb-portless Local CA", ca.subject.to_s
     assert ca.extensions.any? { |e| e.oid == "basicConstraints" && e.value.include?("CA:TRUE") }
   end
 

@@ -3,7 +3,7 @@
 require_relative "lib/portless/version"
 
 Gem::Specification.new do |spec|
-  spec.name = "portless-rb"
+  spec.name = "rb-portless"
   spec.version = Portless::VERSION
   spec.authors = [ "David Afonso" ]
   spec.email = [ "dav@davafons.com" ]
@@ -16,7 +16,7 @@ Gem::Specification.new do |spec|
     backend port so you never collide on 3000/3001 again. Framework-agnostic;
     first-class with Rails.
   DESC
-  spec.homepage = "https://github.com/davafons/portless-rb"
+  spec.homepage = "https://github.com/davafons/rb-portless"
   spec.license = "MIT"
   spec.required_ruby_version = ">= 3.2"
 
@@ -27,7 +27,7 @@ Gem::Specification.new do |spec|
 
   spec.files = Dir["lib/**/*.rb", "exe/*", "README.md", "AGENTS.md", "CHANGELOG.md", "LICENSE"]
   spec.bindir = "exe"
-  spec.executables = [ "portless-rb" ]
+  spec.executables = [ "rb-portless" ]
   spec.require_paths = [ "lib" ]
 
   # async-http gives HTTP/1.1 + HTTP/2 + TLS + WebSockets natively — the Ruby

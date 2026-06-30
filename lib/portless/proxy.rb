@@ -15,7 +15,7 @@ module Portless
   # routes.json per request so new apps appear without a restart. A sibling :80
   # listener 302-redirects to HTTPS. Mirrors portless's proxy.ts.
   class Proxy
-    HOP_HEADER = "x-portless-rb-hops"
+    HOP_HEADER = "x-rb-portless-hops"
     HOP_BY_HOP = %w[connection keep-alive proxy-authenticate proxy-authorization
                     te trailers transfer-encoding upgrade host].freeze
 
@@ -115,7 +115,7 @@ module Portless
         # dispatches to its HTTP/2 or HTTP/1.1 server based on the result.
         ctx.alpn_protocols = [ "h2", "http/1.1" ]
         ctx.alpn_select_cb = ->(offered) { ([ "h2", "http/1.1" ] & offered).first || "http/1.1" }
-        ctx.session_id_context = "portless-rb"
+        ctx.session_id_context = "rb-portless"
         ctx
       end
     end
@@ -136,7 +136,7 @@ module Portless
     end
 
     def error(status, message)
-      body = Protocol::HTTP::Body::Buffered.wrap("<!doctype html><meta charset=utf-8><title>portless-rb</title>" \
+      body = Protocol::HTTP::Body::Buffered.wrap("<!doctype html><meta charset=utf-8><title>rb-portless</title>" \
         "<body style='font:16px system-ui;padding:3rem;max-width:40rem;margin:auto'>" \
         "<h1>#{status}</h1><p>#{message}</p></body>")
       Protocol::HTTP::Response[status, { "content-type" => "text/html; charset=utf-8", Constants::HEALTH_HEADER => "1" }, body]

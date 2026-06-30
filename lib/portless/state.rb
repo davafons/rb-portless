@@ -3,7 +3,7 @@
 require "fileutils"
 
 module Portless
-  # The on-disk state directory (~/.portless-rb): the single source of
+  # The on-disk state directory (~/.rb-portless): the single source of
   # coordination — routes, CA, and pid/port/marker files. No daemon IPC; the
   # proxy watches routes.json and everything else is plain files. Mirrors
   # portless's state-dir model.

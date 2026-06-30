@@ -12,7 +12,7 @@ module Portless
   module Health
     module_function
 
-    REQUEST = "HEAD / HTTP/1.0\r\nHost: portless-rb.localhost\r\n\r\n"
+    REQUEST = "HEAD / HTTP/1.0\r\nHost: rb-portless.localhost\r\n\r\n"
 
     def proxy_running?(port, timeout: 1.0)
       probe_tls(port, timeout) || probe_plain(port, timeout)

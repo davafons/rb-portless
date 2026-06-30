@@ -22,7 +22,7 @@ jobs:
         run: |
           mkdir -p pkg
           version=$(ruby -r ./lib/portless/version -e 'print Portless::VERSION')
-          gem build portless-rb.gemspec --output "pkg/portless-rb-${version}.gem"
+          gem build rb-portless.gemspec --output "pkg/rb-portless-${version}.gem"
 
       - uses: rubygems/configure-rubygems-credentials@v1.0.0
 
