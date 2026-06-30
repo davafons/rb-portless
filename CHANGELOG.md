@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.0]
+
+### Added
+
+- **Auto-trust on first run.** `run` now trusts the local CA automatically the
+  first time (interactive only; skipped with a hint in CI), matching portless —
+  HTTPS works with no browser warnings without a separate `trust` step.
+
 ## [0.1.0] — first release
 
 The full portless workflow for Ruby, validated end-to-end against a real Rails

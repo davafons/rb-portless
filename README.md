@@ -41,12 +41,12 @@ rb-portless run -- npm run dev     # Vite/Astro/etc. get --port injected
 
 A random port (4000–4999) is injected as `PORT` (and `HOST=127.0.0.1`);
 Rails/puma respect it natively. The proxy **auto-starts** on first run: it
-generates a local CA, and binds 443 — a one-time `sudo` on macOS/Linux, exactly
-like portless (falls back to `:1355` if you decline). Run `rb-portless trust`
-once so your browser accepts the certificates.
+generates a local CA, **trusts it** (one keychain/sudo prompt, like portless),
+and binds 443 — another one-time `sudo` on macOS/Linux (falls back to `:1355` if
+you decline). After that, HTTPS just works with no browser warnings.
 
 ```bash
-rb-portless trust                  # trust the local CA (HTTPS, no warnings)
+rb-portless trust                  # re-trust manually if ever needed
 rb-portless service install        # bind 443 at boot — never prompt for sudo again
 ```
 
@@ -104,8 +104,7 @@ end
 ```
 
 ```bash
-rb-portless trust            # one-time: trust the local CA
-rb-portless run bin/dev      # → https://myapp.localhost
+rb-portless run bin/dev      # → https://myapp.localhost (CA auto-trusted on first run)
 ```
 
 That's it. The railtie **auto-detects when you're running under `rb-portless`**
@@ -180,7 +179,7 @@ is the one-line `require "portless/rails"` to satisfy Rails' host authorization.
 | Wildcard tenant subdomains | `tld` config | `portless.json` `{ "tld": "myapp.localhost" }` → `*.myapp.localhost` |
 | Pin the backend port | `--app-port` / `appPort` | `appPort` in `portless.json` |
 | Framework port injection | vite/astro/etc. auto | same (Rails/puma respect `PORT` natively) |
-| HTTPS trust | auto on first run (+ `portless trust`) | `rb-portless trust` (one-time) |
+| HTTPS trust | auto on first run (+ `portless trust`) | auto on first run (+ `rb-portless trust`) |
 | **Host allowlist** | not needed | **`gem "rb-portless", require: "portless/rails"`** (Rails-only) |
 | Privileged 443 bind | sudo re-exec (auto) | sudo re-exec (auto), `:1355` fallback |
 | Bind at boot (no sudo) | `portless service install` | `rb-portless service install` |

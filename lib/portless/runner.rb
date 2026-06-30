@@ -21,6 +21,7 @@ module Portless
       hostname = @config.hostname
       url = "#{@config.tls ? 'https' : 'http'}://#{hostname}"
 
+      ensure_trusted if @config.tls
       Daemon.ensure_running(tls: @config.tls)
       @route_store.add(hostname: hostname, port: port, pid: Process.pid, force: true)
 
@@ -32,6 +33,24 @@ module Portless
     end
 
     private
+
+    # Trust the local CA on first run (like portless), so HTTPS works without
+    # browser warnings out of the box. Interactive only — macOS prompts for
+    # keychain auth; in CI/no-TTY we skip with a hint rather than hang. Never
+    # blocks the run if trusting fails.
+    def ensure_trusted
+      return if Trust.trusted?
+
+      unless Privilege.interactive?
+        warn "rb-portless: CA not trusted — run `rb-portless trust` (HTTPS shows warnings until then)"
+        return
+      end
+
+      warn "rb-portless: trusting the local CA (first run)…"
+      Trust.install!
+    rescue Portless::Error => e
+      warn "rb-portless: couldn't auto-trust the CA (#{e.message}) — run `rb-portless trust`"
+    end
 
     # Run the child in its own process group so we can signal the whole tree,
     # forwarding INT/TERM and propagating its exit status.
