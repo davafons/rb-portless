@@ -12,26 +12,30 @@ module Portless
       @command = Array(command)
       @config = config
       @route_store = route_store
-      @options = options # :lan, :ip, :ngrok, :tailscale, :funnel
+      @options = options # :lan, :ip, :ngrok, :tailscale, :funnel, :name, :force, :app_port
     end
 
     def run
       command = resolved_command
       raise Error, "nothing to run — pass a command, e.g. rb-portless run bin/dev" if command.empty?
 
-      port = @config.app_port&.to_i || FreePort.find
+      # PORTLESS=0|false|skip → run the command straight through, no proxy/route.
+      return exec(*command) if Portless.skip_proxy?
+
+      port = @options[:app_port] || @config.app_port&.to_i || FreePort.find
       command = Frameworks.inject(command, port) # --port/--host for vite/astro/etc.
-      hostname = @config.hostname
+      hostname = @config.hostname(@options[:name])
 
       warn "rb-portless: #{@config.tld_warning}" if @config.tld_warning
       ensure_trusted
       proxy_port = Daemon.ensure_running(tls: @config.tls)
-      @route_store.add(hostname: hostname, port: port, pid: Process.pid, force: true)
+      @route_store.add(hostname: hostname, port: port, pid: Process.pid, force: @options[:force])
 
       url = display_url(hostname, proxy_port)
       rows = [ [ "Local", url, :cyan ] ]
       rows.concat(lan_rows(port, proxy_port))
       rows.concat(share_rows(hostname, port))
+      record_share_urls(hostname, port) # so `rb-portless list` shows the public URLs
       Banner.app(rows: rows, backend_port: port)
 
       status = supervise(command, port, url)
@@ -53,7 +57,7 @@ module Portless
       return [ [ "Network", "no LAN IPv4 found", :dim ] ] unless ip
 
       @lan_host = "#{@config.name}.local"
-      @route_store.add(hostname: @lan_host, port: backend_port, pid: Process.pid, force: true)
+      @route_store.add(hostname: @lan_host, port: backend_port, pid: Process.pid, force: @options[:force])
       @mdns_pid = Mdns.publish(@lan_host, ip)
       warn "rb-portless: trust #{State.ca_cert} on the device for HTTPS over the LAN" if @config.tls
       [ [ "Network", display_url(@lan_host, proxy_port), :green ] ]
@@ -70,6 +74,15 @@ module Portless
         rows << [ @options[:funnel] ? "Funnel" : "Tailnet", @tailscale[:url], :green ]
       end
       rows
+    end
+
+    # Re-register the route with the public share URLs once tunnels are up, so a
+    # `list` from another terminal surfaces them while this run is active.
+    def record_share_urls(hostname, port)
+      return unless @ngrok || @tailscale
+
+      @route_store.add(hostname: hostname, port: port, pid: Process.pid,
+                       tailscale: @tailscale&.dig(:url), ngrok: @ngrok&.dig(:url))
     end
 
     def teardown
