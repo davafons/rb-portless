@@ -1,0 +1,37 @@
+name: Edge
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  edge:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # RubyGems trusted publishing (OIDC)
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+          bundler-cache: true
+
+      - name: Set dev version
+        run: |
+          # e.g. 0.0.1.dev.20260630.abc1234
+          base_version=$(ruby -r ./lib/portless/version -e 'print Portless::VERSION')
+          dev_version="${base_version}.dev.$(date -u +%Y%m%d).$(git rev-parse --short HEAD)"
+          sed -i "s/VERSION = \".*\"/VERSION = \"${dev_version}\"/" lib/portless/version.rb
+          echo "DEV_VERSION=${dev_version}" >> "$GITHUB_ENV"
+
+      - name: Build gem
+        run: |
+          mkdir -p pkg
+          gem build portless-rb.gemspec --output "pkg/portless-rb-${DEV_VERSION}.gem"
+
+      - uses: rubygems/configure-rubygems-credentials@v1.0.0
+
+      - name: Push dev gem to RubyGems
+        run: gem push "pkg/portless-rb-${DEV_VERSION}.gem"

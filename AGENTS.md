@@ -1,0 +1,66 @@
+# AGENTS.md — portless-rb
+
+A native-Ruby port of Vercel's **portless** (`references/portless`, a Node/TS
+monorepo). Goal: feature parity, HTTPS by default, framework-agnostic (Rails is
+the first test target). This file is the map; read it before changing things.
+
+## What it does
+
+`portless-rb run <cmd>` runs a dev server through a local reverse proxy reachable
+at `https://<name>.localhost` — no port numbers. A random backend port is
+injected as `PORT`; the proxy routes the named host to it.
+
+## Core mechanisms (ported from portless — keep these invariants)
+
+- **No daemon IPC.** All coordination is files in `~/.portless-rb` (overridable
+  via `PORTLESS_STATE_DIR`): `routes.json` (host→port→pid) under a `mkdir` lock,
+  plus `proxy.pid`/`proxy.port`/CA files. The proxy watches `routes.json`.
+- **Privileged port = re-exec under sudo.** For ports < 1024, re-run the CLI via
+  `sudo env PORTLESS_*=… ruby <cli> proxy start …`; the elevated process binds
+  the socket and chowns state files back to `SUDO_UID`. Fall back to `:1355` if
+  sudo is denied and no explicit port was given. Refuse in CI/no-TTY.
+- **Health header.** Every proxied response carries `X-Portless-Rb`; a HEAD probe
+  is how we tell *our* proxy from any other process on a port.
+- **Wildcard routing.** A route `name.localhost` also serves `*.name.localhost`
+  (exact match first, then `host.end_with?(".#{route}")`). Critical for
+  subdomain-per-tenant apps (e.g. `*.shirabe.org.localhost`).
+- **Per-host SNI certs.** `*.localhost` wildcard certs are invalid at the
+  reserved-TLD boundary, so mint a leaf per hostname on the TLS SNI callback,
+  cached on disk + in memory.
+
+## Module map (`lib/portless/`)
+
+| File | Role | portless source |
+| --- | --- | --- |
+| `constants.rb` | ports, thresholds, state-dir, header, markers | cli-utils.ts |
+| `state.rb` | state-dir paths + chown-back-to-SUDO_UID | utils.ts |
+| `config.rb` | portless.json + name/tld inference | config.ts, auto.ts |
+| `free_port.rb` | random 4000–4999 finder (skip bad ports) | cli-utils.ts findFreePort |
+| `route_store.rb` | routes.json + dir-lock + dead-pid reap | routes.ts |
+| `health.rb` | X-Portless-Rb probe + discoverState | cli-utils.ts |
+| `privilege.rb` | needs-sudo, sudo re-exec, 1355 fallback | cli.ts handleProxy |
+| `hosts.rb` | /etc/hosts marked-block sync/clean | hosts.ts |
+| `certs.rb` | OpenSSL CA + per-host SNI leaf certs | certs.ts |
+| `trust.rb` | OS trust store install/remove | certs.ts trustCA |
+| `proxy.rb` | async-http reverse proxy (h1/h2/tls/ws) | proxy.ts |
+| `runner.rb` | run cmd: port→env→spawn→register→supervise | cli.ts runApp |
+| `cli.rb` | command dispatch | cli.ts main |
+
+## Build plan
+
+- **Phase 0 (done):** scaffold + coordination layer (config, state, free_port,
+  route_store, health, privilege, hosts) + CLI dispatch skeleton.
+- **Phase 1:** HTTPS proxy on async-http (TLS+SNI, h1+ws, wildcard routing,
+  X-Forwarded-*, loop guard, routes watch), certs + macOS trust, runner, sudo
+  bind + 1355 fallback. Verify against shirabe at `https://*.shirabe.org.localhost`.
+- **Phase 2:** HTTP/2, full command surface (doctor/clean/prune/alias/get/hosts),
+  boot service (launchd/systemd/schtasks), daemon lifecycle.
+- **Phase 3:** LAN/mDNS, tailscale/ngrok, framework `--port` injection, multi-app
+  workspaces, Linux/Windows parity, optional `portless-rb/rails` railtie.
+
+## Conventions
+
+- Stdlib-first; the only runtime deps are `async` + `async-http` (for h1/h2/tls/ws).
+- Minitest + fixtures-free tests in `test/`; isolate state via `PORTLESS_STATE_DIR`.
+- Mirror portless's naming/structure so the two stay diffable against
+  `references/portless`.

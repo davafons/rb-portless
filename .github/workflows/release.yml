@@ -1,0 +1,54 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write # RubyGems trusted publishing (OIDC)
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+
+      - name: Build gem
+        run: |
+          mkdir -p pkg
+          version=$(ruby -r ./lib/portless/version -e 'print Portless::VERSION')
+          gem build portless-rb.gemspec --output "pkg/portless-rb-${version}.gem"
+
+      - uses: rubygems/configure-rubygems-credentials@v1.0.0
+
+      - name: Push to RubyGems
+        run: |
+          set -euo pipefail
+          for gem in pkg/*.gem; do
+            echo "Pushing $gem"
+            # Idempotent: treat "already published" as success on re-runs.
+            output=$(gem push "$gem" 2>&1) && status=0 || status=$?
+            echo "$output"
+            [ "$status" -eq 0 ] && continue
+            if echo "$output" | grep -q "Repushing of gem versions is not allowed"; then
+              echo "  -> already published, skipping"
+              continue
+            fi
+            exit "$status"
+          done
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION_TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$VERSION_TAG" &>/dev/null; then
+            gh release upload "$VERSION_TAG" pkg/*.gem --clobber
+          else
+            gh release create "$VERSION_TAG" pkg/*.gem --title "$VERSION_TAG" --generate-notes
+          fi

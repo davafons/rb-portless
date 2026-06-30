@@ -1,0 +1,10 @@
+/.bundle/
+/pkg/
+/tmp/
+/coverage/
+*.gem
+Gemfile.lock
+.DS_Store
+
+# The reference clone of Vercel's portless (not part of our gem).
+/references/
