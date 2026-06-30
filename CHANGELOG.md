@@ -15,9 +15,12 @@ All notable changes to this project are documented here. The format follows
 
 - **Risky-TLD warning.** Warn when the configured `tld` ends in a real/reserved
   TLD (`dev`, `app`, `local`, …) that could intercept live traffic.
-- **More tests** — health probes and privilege logic. (Verified manually, since
-  the Async proxy can't be driven in-process without deadlock: HTTP/HTTPS/HTTP-2
-  forwarding, wildcard routing, and the **WebSocket upgrade relay** / ActionCable.)
+- **More tests** — `Proxy#call` is now public, so the proxy's routing + error
+  logic is unit-tested (404 / 508 loop guard / 502 dead-backend, all stamped with
+  the health header) plus health probes and privilege logic (42 tests). The
+  successful byte-forward + **WebSocket upgrade relay** (ActionCable) need a live
+  reactor and are verified end-to-end manually — async-http servers can't be torn
+  down in-process without deadlock.
 
 
 - **Startup banner.** Running a dev server through rb-portless now prints a clear

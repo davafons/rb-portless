@@ -51,13 +51,10 @@ module Portless
         routes.find { |r| host.end_with?(".#{r.hostname}") }
     end
 
-    private
-
-    def make_server(endpoint)
-      Async::HTTP::Server.for(endpoint) { |request| handle(request) }
-    end
-
-    def handle(request)
+    # The reverse-proxy app: resolve the request's host to a backend, forward it,
+    # stamp the health header. Public so it can be mounted in a test reactor
+    # (Async::HTTP::Server.for(endpoint, &proxy.method(:call))).
+    def call(request)
       host = request_host(request)
       route = route_for(host)
       return error(404, "No app is registered for #{host}.") unless route
@@ -70,6 +67,12 @@ module Portless
       response
     rescue StandardError => e
       error(502, "Backend for #{host} is not responding (#{e.class}).")
+    end
+
+    private
+
+    def make_server(endpoint)
+      Async::HTTP::Server.for(endpoint) { |request| call(request) }
     end
 
     def build_forward(request, host, hops)
