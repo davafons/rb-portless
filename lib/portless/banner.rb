@@ -32,12 +32,10 @@ module Portless
 
     def row(label, value) = "  #{green('➜')}  #{label.to_s.ljust(8)}#{value}"
 
-    # ── colours (no-op unless stderr is a TTY) ──
-    def paint(code, str) = tty? ? "\e[#{code}m#{str}\e[0m" : str
-    def bold(str)  = paint("1", str)
-    def dim(str)   = paint("90", str)
-    def cyan(str)  = paint("36", str)
-    def green(str) = paint("32", str)
-    def tty? = $stderr.tty?
+    # ── colours (target stderr, where the banner is printed) ──
+    def bold(str)  = Colors.bold(str, io: $stderr)
+    def dim(str)   = Colors.dim(str, io: $stderr)
+    def cyan(str)  = Colors.cyan(str, io: $stderr)
+    def green(str) = Colors.green(str, io: $stderr)
   end
 end
