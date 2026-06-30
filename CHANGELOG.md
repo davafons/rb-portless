@@ -4,6 +4,18 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.1]
+
+### Changed (internal — no behaviour change)
+
+- **Deduped the two run paths.** `Runner` and `Multi` shared three methods
+  (`child_env`, `display_url`, `ensure_trusted`); they now live in a `RunSupport`
+  mixin. Multi-app mode picks up the actionable first-run CA-trust hints the
+  single-app path already had.
+- **Dropped dead code** — `CLI#todo`, the unread `Config#script`/`DEFAULT_SCRIPT`,
+  `State.ca_serial` (no on-disk serial; the native CA sets it on the cert), and
+  `Hosts.managed_hostnames` (no caller).
+
 ## [0.3.0]
 
 ### Fixed / hardened
