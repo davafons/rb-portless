@@ -34,7 +34,32 @@ module Portless
 
     # ── Commands ────────────────────────────────────────────────────────────
     def cmd_run(args)
-      Runner.new(command: strip_flags(args)).run
+      options, command = parse_run(args)
+      if command.empty? && Config.load.apps.any?
+        Multi.new.run # monorepo: portless.json `apps` map
+      else
+        Runner.new(command: command, options: options).run
+      end
+    end
+
+    # Consume leading rb-portless flags (--lan/--ip/--ngrok/--tailscale/--funnel),
+    # stopping at the first non-flag, an unknown flag, or `--`; the rest is the
+    # command to run.
+    def parse_run(args)
+      options = {}
+      rest = args.dup
+      while (flag = rest.first)&.start_with?("--")
+        case flag
+        when "--lan"       then options[:lan] = true; rest.shift
+        when "--ip"        then rest.shift; options[:ip] = rest.shift
+        when "--ngrok"     then options[:ngrok] = true; rest.shift
+        when "--tailscale" then options[:tailscale] = true; rest.shift
+        when "--funnel"    then options[:funnel] = true; rest.shift
+        when "--"          then rest.shift; break
+        else break
+        end
+      end
+      [ options, rest ]
     end
 
     def cmd_proxy(args)
@@ -180,11 +205,6 @@ module Portless
       i ? Integer(args[i + 1], exception: false) : nil
     end
 
-    def strip_flags(args)
-      # everything after `run`, minus our own flags
-      args.reject { |a| a.start_with?("--portless") }
-    end
-
     def todo(name, desc, _args = nil)
       warn "rb-portless #{name}: #{desc} — not yet implemented (#{Portless::VERSION})"
       exit 1
@@ -206,7 +226,7 @@ module Portless
 
         Usage:
           rb-portless run <command>        run a dev server through the proxy
-          rb-portless [<command>]          (bare) run the project's dev script
+          rb-portless run                  run the `apps` map, or the dev script
           rb-portless proxy start|stop     manage the proxy daemon
           rb-portless trust                trust the local CA (HTTPS)
           rb-portless hosts sync|clean     manage /etc/hosts (Safari fallback)
@@ -214,6 +234,11 @@ module Portless
           rb-portless doctor               diagnose setup
           rb-portless clean | prune        tear down / reap orphans
           rb-portless service install      bind the privileged port at boot
+
+        run flags:
+          --lan [--ip <addr>]              also serve on the LAN (<name>.local)
+          --ngrok                          share publicly via ngrok
+          --tailscale | --funnel           share via your tailnet / Funnel
 
         HTTPS is the default (https://<name>.localhost). Config: portless.json.
       HELP

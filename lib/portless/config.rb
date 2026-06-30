@@ -9,7 +9,7 @@ module Portless
   class Config
     DEFAULT_SCRIPT = "dev"
 
-    attr_reader :name, :tld, :script, :app_port, :tls
+    attr_reader :name, :tld, :script, :app_port, :tls, :apps
 
     def self.load(dir = Dir.pwd)
       new(read_file(dir), dir)
@@ -22,6 +22,8 @@ module Portless
       @script = data["script"] || DEFAULT_SCRIPT
       @app_port = data["appPort"] || data["app_port"]
       @tls = data.fetch("tls", true)
+      # Monorepo: { "apps": { "web": "bin/rails server", "api": "node api.js" } }.
+      @apps = (data["apps"] || {}).transform_keys { |k| sanitize_label(k) }
     end
 
     # The full hostname an app registers (e.g. "shirabe.org.localhost" when tld is

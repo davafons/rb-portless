@@ -46,6 +46,10 @@ injected as `PORT`; the proxy routes the named host to it.
 | `daemon.rb` | proxy start/stop, sudo bind, 1355 fallback | cli.ts handleProxy |
 | `service.rb` | launchd / systemd boot service | service.ts |
 | `frameworks.rb` | --port/--host injection (vite/astro/…) | cli-utils.ts |
+| `banner.rb` | the "where's my app" startup banner | cli.ts (run output) |
+| `multi.rb` | monorepo: run many apps under one proxy | workspace.ts/turbo.ts |
+| `lan_ip.rb` / `mdns.rb` | LAN IP detect + `<name>.local` mDNS publish | lan-ip.ts/mdns.ts |
+| `share/ngrok.rb` / `share/tailscale.rb` | public/tailnet sharing | ngrok.ts/tailscale.ts |
 | `runner.rb` | run cmd: port→env→spawn→register→supervise | cli.ts runApp |
 | `rails.rb` | opt-in railtie (whitelist *.localhost in dev) | — |
 | `cli.rb` | command dispatch | cli.ts main |
@@ -62,13 +66,15 @@ injected as `PORT`; the proxy routes the named host to it.
 - **Phase 3 ✅ (partial)** framework `--port`/`--host` injection, Linux CA trust,
   optional `portless/rails` railtie.
 
+- **Phase 4 ✅** startup banner; monorepo multi-app (`apps` map); LAN mode
+  (`--lan`: LanIp + mDNS `<name>.local`); public sharing (`--ngrok`/`--tailscale`/
+  `--funnel`, experimental).
+
 ### Roadmap (not yet built)
 
-- LAN mode (mDNS `.local` publishing) for phones/tablets.
-- Public sharing via `tailscale serve|funnel` and `ngrok`.
-- Monorepo multi-app (one proxy, many named apps).
 - Windows CA trust + Task Scheduler service.
 - WebSocket upgrade relay hardening + HTTP/2 to the backend.
+- mDNS LAN-IP change monitoring (re-publish on network switch).
 
 ## Conventions
 

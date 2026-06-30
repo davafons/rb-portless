@@ -26,6 +26,11 @@ class SmokeTest < Minitest::Test
     assert_equal "shirabe.org.localhost", config.hostname
   end
 
+  def test_config_parses_apps_map
+    config = Portless::Config.new({ "apps" => { "web" => "bin/rails server", "api" => "node a.js" } }, Dir.pwd)
+    assert_equal({ "web" => "bin/rails server", "api" => "node a.js" }, config.apps)
+  end
+
   def test_route_store_add_remove_roundtrip
     store = Portless::RouteStore.new
     store.add(hostname: "x.localhost", port: 4123, pid: Process.pid)

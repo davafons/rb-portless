@@ -6,10 +6,11 @@ module Portless
   # group (forwarding signals), and deregister on exit. Rails/puma respect PORT
   # natively. Mirrors portless's runApp/spawnCommand.
   class Runner
-    def initialize(command:, config: Config.load, route_store: RouteStore.new)
+    def initialize(command:, config: Config.load, route_store: RouteStore.new, options: {})
       @command = Array(command)
       @config = config
       @route_store = route_store
+      @options = options # :lan, :ip, :ngrok, :tailscale, :funnel
     end
 
     def run
@@ -19,20 +20,68 @@ module Portless
       port = @config.app_port&.to_i || FreePort.find
       command = Frameworks.inject(command, port) # --port/--host for vite/astro/etc.
       hostname = @config.hostname
-      url = "#{@config.tls ? 'https' : 'http'}://#{hostname}"
 
       ensure_trusted if @config.tls
-      Daemon.ensure_running(tls: @config.tls)
+      proxy_port = Daemon.ensure_running(tls: @config.tls)
       @route_store.add(hostname: hostname, port: port, pid: Process.pid, force: true)
 
-      announce(url, port)
+      url = display_url(hostname, proxy_port)
+      rows = [ [ "Local", url, :cyan ] ]
+      rows.concat(lan_rows(port, proxy_port))
+      rows.concat(share_rows(hostname, port))
+      Banner.app(rows: rows, backend_port: port)
+
       status = supervise(command, port, url)
       exit(status)
     ensure
+      teardown
       @route_store.remove(hostname, owner_pid: Process.pid) if hostname
     end
 
     private
+
+    def display_url(hostname, proxy_port)
+      scheme = @config.tls ? "https" : "http"
+      default = @config.tls ? Constants::HTTPS_PORT : Constants::HTTP_PORT
+      suffix = proxy_port && proxy_port != default ? ":#{proxy_port}" : ""
+      "#{scheme}://#{hostname}#{suffix}"
+    end
+
+    # ── LAN mode (--lan) ──────────────────────────────────────────────────
+    # Register a `<name>.local` route, publish it over mDNS, and surface the URL
+    # so phones/tablets on the Wi-Fi can reach the app.
+    def lan_rows(backend_port, proxy_port)
+      return [] unless @options[:lan]
+
+      ip = LanIp.detect(@options[:ip])
+      return [ [ "Network", "no LAN IPv4 found", :dim ] ] unless ip
+
+      @lan_host = "#{@config.name}.local"
+      @route_store.add(hostname: @lan_host, port: backend_port, pid: Process.pid, force: true)
+      @mdns_pid = Mdns.publish(@lan_host, ip)
+      warn "rb-portless: trust #{State.ca_cert} on the device for HTTPS over the LAN" if @config.tls
+      [ [ "Network", display_url(@lan_host, proxy_port), :green ] ]
+    end
+
+    # ── Public sharing (--ngrok / --tailscale / --funnel) ─────────────────
+    def share_rows(hostname, backend_port)
+      rows = []
+      if @options[:ngrok] && (@ngrok = Share::Ngrok.start(hostname: hostname, backend_port: backend_port))
+        rows << [ "Public", @ngrok[:url], :green ]
+      end
+      if (@options[:tailscale] || @options[:funnel]) &&
+         (@tailscale = Share::Tailscale.start(backend_port: backend_port, funnel: @options[:funnel]))
+        rows << [ @options[:funnel] ? "Funnel" : "Tailnet", @tailscale[:url], :green ]
+      end
+      rows
+    end
+
+    def teardown
+      Mdns.unpublish(@mdns_pid)
+      @route_store.remove(@lan_host, owner_pid: Process.pid) if @lan_host
+      Share::Ngrok.stop(@ngrok) if @ngrok
+      Share::Tailscale.stop(@tailscale) if @tailscale
+    end
 
     # Trust the local CA on first run (like portless), so HTTPS works without
     # browser warnings out of the box. Interactive only — macOS prompts for
@@ -91,10 +140,6 @@ module Portless
       return [ "bin/rails", "server" ] if File.executable?("bin/rails")
 
       []
-    end
-
-    def announce(url, port)
-      warn "rb-portless → #{url}  (backend :#{port})"
     end
   end
 end

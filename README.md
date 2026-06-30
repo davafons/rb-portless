@@ -66,6 +66,37 @@ rb-portless service install        # bind 443 at boot — never prompt for sudo 
 With a custom `tld`, every `*.shirabe.org.localhost` subdomain wildcard-routes to
 the one app — ideal for subdomain-per-tenant apps.
 
+## Multiple apps, LAN & sharing
+
+**Monorepo / multi-app** — define an `apps` map and `rb-portless run` (no command)
+starts them all, each at its own name:
+
+```jsonc
+// portless.json
+{ "apps": { "web": "bin/rails server", "api": "node api/server.js" } }
+// → https://web.localhost, https://api.localhost
+```
+
+**LAN mode** — reach the app from your phone on the same Wi-Fi. It detects the
+LAN IP, registers `<name>.local`, and publishes it over mDNS:
+
+```bash
+rb-portless run --lan bin/dev      # also → https://<name>.local
+rb-portless run --lan --ip 10.0.0.5 bin/dev   # override the detected IP
+```
+> Devices won't trust your local CA without installing it — use `--lan` with
+> `--no-tls` (set `"tls": false`) for plain HTTP, or install `~/.rb-portless/ca.pem`
+> on the device.
+
+**Public sharing** (experimental) — expose the app via ngrok or your tailnet:
+
+```bash
+rb-portless run --ngrok bin/dev        # https://xxxx.ngrok.app
+rb-portless run --tailscale bin/dev    # your-machine.tailnet.ts.net
+rb-portless run --funnel bin/dev       # tailscale Funnel (public)
+```
+Each degrades gracefully if the tool isn't installed.
+
 ## Commands
 
 | Command | Does |

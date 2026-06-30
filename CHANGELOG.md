@@ -4,6 +4,20 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.0]
+
+### Added
+
+- **Startup banner.** Running a dev server through rb-portless now prints a clear
+  banner with the named URL(s) it's reachable at — not just `127.0.0.1:port`.
+- **Monorepo / multi-app.** A `portless.json` `apps` map runs several apps under
+  one proxy, each at its own `<name>.<tld>` (`rb-portless run` with no command).
+- **LAN mode (`--lan`).** Reach the app from phones/tablets on the same Wi-Fi:
+  detects the LAN IP, registers `<name>.local`, and publishes it over mDNS
+  (`dns-sd`/`avahi-publish`). `--ip` overrides the detected address.
+- **Public sharing (experimental).** `--ngrok`, `--tailscale`, `--funnel` expose
+  the app via ngrok / your tailnet. Degrade gracefully when the tool is absent.
+
 ## [0.2.0]
 
 ### Added
