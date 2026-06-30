@@ -5,16 +5,24 @@ require_relative "test_helper"
 # The sharing integrations degrade gracefully when the CLI tool isn't installed
 # (the happy path needs ngrok/tailscale + accounts, so it's manual).
 class ShareTest < Minitest::Test
-  def test_ngrok_skips_when_absent
-    Portless.stub(:which, false) do
-      assert_nil Portless::Share::Ngrok.start(hostname: "x.localhost", backend_port: 4321)
+  def test_ngrok_warns_and_skips_when_absent
+    result = nil
+    _out, err = capture_io do
+      Portless.stub(:which, false) { result = Portless::Share::Ngrok.start(hostname: "x.localhost", backend_port: 4321) }
     end
+    assert_nil result
+    assert_match(/ngrok not found/, err)
+    assert_match %r{ngrok.com/download}, err
   end
 
-  def test_tailscale_skips_when_absent
-    Portless.stub(:which, false) do
-      assert_nil Portless::Share::Tailscale.start(backend_port: 4321)
+  def test_tailscale_warns_and_skips_when_absent
+    result = nil
+    _out, err = capture_io do
+      Portless.stub(:which, false) { result = Portless::Share::Tailscale.start(backend_port: 4321) }
     end
+    assert_nil result
+    assert_match(/tailscale not found/, err)
+    assert_match %r{tailscale.com/download}, err
   end
 
   # Safety: never reuse a port the user's existing serve config already occupies.

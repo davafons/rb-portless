@@ -16,7 +16,10 @@ module Portless
       API = "http://127.0.0.1:4040/api/tunnels"
 
       def start(hostname:, backend_port:)
-        return nil unless Portless.which("ngrok")
+        unless Portless.which("ngrok")
+          warn "rb-portless: ngrok not found — install it (https://ngrok.com/download) to use --ngrok"
+          return nil
+        end
 
         pid = Process.spawn("ngrok", "http", backend_port.to_s, "--host-header=#{hostname}",
                             out: File::NULL, err: File::NULL)
@@ -26,9 +29,11 @@ module Portless
           { pid: pid, url: url }
         else
           stop(pid: pid)
+          warn "rb-portless: ngrok didn't produce a public URL — is your authtoken set? (`ngrok config add-authtoken <token>`)"
           nil
         end
-      rescue StandardError
+      rescue StandardError => e
+        warn "rb-portless: ngrok failed (#{e.message})"
         nil
       end
 

@@ -18,21 +18,44 @@ module Portless
       FUNNEL_PORTS = [ 443, 8443, 10_000 ].freeze # Funnel supports only these
 
       def start(backend_port:, funnel: false)
-        return nil unless Portless.which("tailscale")
+        unless Portless.which("tailscale")
+          warn "rb-portless: tailscale not found — install it (https://tailscale.com/download) to use --tailscale"
+          return nil
+        end
+
+        status = status_json
+        unless status
+          warn "rb-portless: tailscale isn't connected — run `tailscale up`, then retry"
+          return nil
+        end
+        unless capability?(status, "https")
+          warn "rb-portless: tailscale HTTPS certs aren't enabled — turn on HTTPS in your tailnet DNS settings"
+          return nil
+        end
+        if funnel && !capability?(status, "funnel")
+          warn "rb-portless: tailscale Funnel isn't enabled for this node — enable it, then retry --funnel"
+          return nil
+        end
 
         mode = funnel ? "funnel" : "serve"
         port = available_port(funnel: funnel)
-        return nil unless port # all preferred ports already in use → don't fight it
+        unless port
+          warn "rb-portless: all tailscale Funnel ports are in use (443/8443/10000)"
+          return nil
+        end
 
-        ok = system("tailscale", mode, "--bg", "--yes", "--https=#{port}",
-                    "http://127.0.0.1:#{backend_port}", out: File::NULL, err: File::NULL)
-        return nil unless ok
+        unless system("tailscale", mode, "--bg", "--yes", "--https=#{port}",
+                      "http://127.0.0.1:#{backend_port}", out: File::NULL, err: File::NULL)
+          warn "rb-portless: `tailscale #{mode}` failed to register"
+          return nil
+        end
 
-        base = magic_dns_url
+        base = dns_name(status)
         return (off(mode, port) and nil) unless base
 
         { mode: mode, port: port, url: format_url(base, port) }
-      rescue StandardError
+      rescue StandardError => e
+        warn "rb-portless: tailscale sharing failed (#{e.message})"
         nil
       end
 
@@ -74,12 +97,23 @@ module Portless
         []
       end
 
-      def magic_dns_url
+      def status_json
         json = JSON.parse(`tailscale status --json 2>/dev/null`)
-        dns = json.dig("Self", "DNSName").to_s.chomp(".")
-        dns.empty? ? nil : "https://#{dns}"
+        json.is_a?(Hash) ? json : nil
       rescue StandardError
         nil
+      end
+
+      def dns_name(status)
+        dns = status.dig("Self", "DNSName").to_s.chomp(".")
+        dns.empty? ? nil : "https://#{dns}"
+      end
+
+      # Does this node have the HTTPS / Funnel capability? (mirrors portless)
+      def capability?(status, name)
+        node = status["Self"] || {}
+        names = Array(node["Capabilities"]) + (node["CapMap"] || {}).keys
+        names.any? { |cap| down = cap.to_s.downcase; down == name || down.end_with?("/#{name}") }
       end
 
       def format_url(base, port)
