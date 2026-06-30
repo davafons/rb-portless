@@ -29,7 +29,6 @@ module Portless
     def proxy_log = path("proxy.log")
     def ca_cert = path("ca.pem")
     def ca_key = path("ca-key.pem")
-    def ca_serial = path("ca.srl")
     def ca_trusted_marker = path("ca.trusted")
     def host_certs_dir = path("host-certs")
 

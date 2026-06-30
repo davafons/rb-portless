@@ -24,11 +24,6 @@ module Portless
       write(strip_block(read))
     end
 
-    def managed_hostnames
-      read[/#{Regexp.escape(Constants::HOSTS_BEGIN)}\n(.*?)#{Regexp.escape(Constants::HOSTS_END)}/m, 1]
-        .to_s.scan(/^\s*127\.0\.0\.1\s+(\S+)/).flatten
-    end
-
     def build_block(hostnames)
       return "" if hostnames.empty?
       lines = hostnames.uniq.map { |h| "127.0.0.1\t#{h}" }

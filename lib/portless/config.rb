@@ -7,9 +7,7 @@ module Portless
   # defaults. Mirrors portless's config.ts/auto.ts: name is inferred from the
   # config, the git root, or the directory; tld defaults to "localhost".
   class Config
-    DEFAULT_SCRIPT = "dev"
-
-    attr_reader :name, :tld, :script, :app_port, :tls, :apps
+    attr_reader :name, :tld, :app_port, :tls, :apps
 
     def self.load(dir = Dir.pwd)
       new(read_file(dir), dir)
@@ -19,7 +17,6 @@ module Portless
       @dir = dir
       @name = sanitize_label(data["name"] || infer_name(dir))
       @tld = (data["tld"] || Constants::DEFAULT_TLD).to_s
-      @script = data["script"] || DEFAULT_SCRIPT
       @app_port = data["appPort"] || data["app_port"]
       @tls = data.fetch("tls", true)
       # Monorepo: { "apps": { "web": "bin/rails server", "api": "node api.js" } }.

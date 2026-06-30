@@ -205,11 +205,6 @@ module Portless
       i ? Integer(args[i + 1], exception: false) : nil
     end
 
-    def todo(name, desc, _args = nil)
-      warn "rb-portless #{name}: #{desc} — not yet implemented (#{Portless::VERSION})"
-      exit 1
-    end
-
     def rest(command)
       @argv.first == command ? @argv[1..] : @argv
     end

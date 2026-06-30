@@ -7,6 +7,8 @@ module Portless
   # supervised + torn down together. Ruby sets env per-spawn, so there's no
   # NODE_OPTIONS loader hack (cf. portless's turbo.ts).
   class Multi
+    include RunSupport
+
     App = Struct.new(:name, :hostname, :port, :url, :pid, keyword_init: true)
 
     def initialize(config: Config.load, route_store: RouteStore.new)
@@ -18,7 +20,7 @@ module Portless
     def run
       raise Error, "no apps defined — add an \"apps\" map to portless.json" if @config.apps.empty?
 
-      ensure_trusted if @config.tls
+      ensure_trusted
       proxy_port = Daemon.ensure_running(tls: @config.tls)
       @apps = @config.apps.map { |name, command| start_app(name, command, proxy_port) }
 
@@ -56,28 +58,6 @@ module Portless
     def teardown
       @apps.each { |app| @route_store.remove(app.hostname, owner_pid: Process.pid) }
       kill_all("TERM")
-    end
-
-    def child_env(port, url)
-      {
-        "PORT" => port.to_s,
-        "HOST" => "127.0.0.1",
-        "PORTLESS_URL" => url,
-        "SSL_CERT_FILE" => (File.exist?(State.ca_cert) ? State.ca_cert : nil)
-      }.compact
-    end
-
-    def display_url(hostname, proxy_port)
-      scheme = @config.tls ? "https" : "http"
-      default = @config.tls ? Constants::HTTPS_PORT : Constants::HTTP_PORT
-      suffix = proxy_port && proxy_port != default ? ":#{proxy_port}" : ""
-      "#{scheme}://#{hostname}#{suffix}"
-    end
-
-    def ensure_trusted
-      Trust.install! if Privilege.interactive? && !Trust.trusted?
-    rescue Portless::Error
-      nil
     end
   end
 end
