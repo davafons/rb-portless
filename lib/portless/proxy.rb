@@ -110,7 +110,11 @@ module Portless
         cert, key = @certs.leaf_for(hostname)
         ctx = OpenSSL::SSL::SSLContext.new
         ctx.add_certificate(cert, key, [ @certs.ca_certificate ])
-        ctx.alpn_protocols = [ "http/1.1" ] # h2 added in phase 2
+        # Offer HTTP/2 with HTTP/1.1 fallback. Servers negotiate via the *select*
+        # callback (alpn_protocols is the client-side list); async-http then
+        # dispatches to its HTTP/2 or HTTP/1.1 server based on the result.
+        ctx.alpn_protocols = [ "h2", "http/1.1" ]
+        ctx.alpn_select_cb = ->(offered) { ([ "h2", "http/1.1" ] & offered).first || "http/1.1" }
         ctx.session_id_context = "portless-rb"
         ctx
       end
