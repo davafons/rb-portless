@@ -9,7 +9,7 @@ module Portless
   # directory mutex (atomic mkdir), and the proxy watches it. Dead-pid entries
   # are reaped on every load. Mirrors portless's RouteStore.
   class RouteStore
-    Route = Struct.new(:hostname, :port, :pid, keyword_init: true) do
+    Route = Struct.new(:hostname, :port, :pid, :tailscale, :ngrok, keyword_init: true) do
       def alias? = pid.to_i.zero? # pid 0 = static alias (never reaped)
     end
 
@@ -22,39 +22,58 @@ module Portless
     end
 
     def routes
-      load.map { |h| Route.new(hostname: h["hostname"], port: h["port"], pid: h["pid"]) }
+      load.map do |h|
+        Route.new(hostname: h["hostname"], port: h["port"], pid: h["pid"],
+                  tailscale: h["tailscale"], ngrok: h["ngrok"])
+      end
     end
 
     # Register (or replace) a route. Conflicts with a *live* different owner raise
-    # unless force, which SIGTERMs the incumbent. Alias routes use pid 0.
-    def add(hostname:, port:, pid:, force: false)
+    # unless force, which SIGTERMs the incumbent. Alias routes use pid 0. Public
+    # share URLs (tailscale/ngrok), when present, are recorded so `list` can show
+    # them while the run is active.
+    def add(hostname:, port:, pid:, force: false, tailscale: nil, ngrok: nil)
       with_lock do
         all = load.reject { |r| dead?(r["pid"]) }
         existing = all.find { |r| r["hostname"] == hostname }
         if existing && existing["pid"].to_i != pid.to_i && !dead?(existing["pid"])
-          raise Error, "#{hostname} is already served by pid #{existing['pid']}" unless force
+          unless force
+            raise RouteConflictError,
+                  "#{hostname} is already served by pid #{existing['pid']} — pass --force to take it over"
+          end
           terminate(existing["pid"])
         end
         all.reject! { |r| r["hostname"] == hostname }
-        all << { "hostname" => hostname, "port" => port, "pid" => pid }
+        entry = { "hostname" => hostname, "port" => port, "pid" => pid }
+        entry["tailscale"] = tailscale if tailscale
+        entry["ngrok"] = ngrok if ngrok
+        all << entry
         write(all)
       end
     end
 
     # Remove a route only if still owned by `owner_pid` (so a force-replaced
-    # predecessor doesn't delete the successor's route on its way out).
+    # predecessor doesn't delete the successor's route on its way out). Returns
+    # whether anything was actually removed.
     def remove(hostname, owner_pid: nil)
       with_lock do
-        all = load
-        all.reject! do |r|
+        before = load
+        after = before.reject do |r|
           r["hostname"] == hostname && (owner_pid.nil? || r["pid"].to_i == owner_pid.to_i)
         end
-        write(all)
+        write(after)
+        after.size < before.size
       end
     end
 
+    # Drop dead-pid routes and return them (so callers can reap the orphaned
+    # process still holding the backend port). Alias routes (pid 0) are kept.
     def prune
-      with_lock { write(load.reject { |r| dead?(r["pid"]) }) }
+      with_lock do
+        dead, alive = load.partition { |r| dead?(r["pid"]) }
+        write(alive)
+        dead.map { |r| Route.new(hostname: r["hostname"], port: r["port"], pid: r["pid"]) }
+      end
     end
 
     private
