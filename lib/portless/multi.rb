@@ -35,7 +35,8 @@ module Portless
 
     def start_app(name, command, proxy_port)
       port = FreePort.find
-      hostname = "#{name}.#{@config.tld}"
+      prefix = @config.worktree_prefix
+      hostname = "#{prefix ? "#{prefix}.#{name}" : name}.#{@config.tld}"
       url = display_url(hostname, proxy_port)
       @route_store.add(hostname: hostname, port: port, pid: Process.pid, force: true)
       # A bare command string runs through the shell (handles "bin/rails server").

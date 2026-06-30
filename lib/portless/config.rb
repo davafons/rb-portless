@@ -24,9 +24,22 @@ module Portless
     end
 
     # The full hostname an app registers (e.g. "shirabe.org.localhost" when tld is
-    # set to that, or "<name>.localhost" by default).
-    def hostname
-      tld.split(".").include?(name) ? tld : "#{name}.#{tld}"
+    # set to that, or "<name>.localhost" by default). `name` overrides the base
+    # (used by --name); `worktree:` prepends the git-worktree branch prefix so a
+    # linked worktree gets its own URL (`auth.<name>.localhost`).
+    def hostname(name = nil, worktree: true)
+      base = name ? sanitize_label(name) : @name
+      host = tld.split(".").include?(base) ? tld : "#{base}.#{tld}"
+      prefix = worktree ? worktree_prefix : nil
+      prefix ? "#{prefix}.#{host}" : host
+    end
+
+    # The git-worktree subdomain prefix for this project dir (nil if none).
+    # Memoized — it shells out to git.
+    def worktree_prefix
+      return @worktree_prefix if defined?(@worktree_prefix)
+
+      @worktree_prefix = Worktree.prefix(@dir)
     end
 
     # Real/reserved TLDs that can intercept live traffic or clash with mDNS.
