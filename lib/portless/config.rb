@@ -32,6 +32,17 @@ module Portless
       tld.split(".").include?(name) ? tld : "#{name}.#{tld}"
     end
 
+    # Real/reserved TLDs that can intercept live traffic or clash with mDNS.
+    RISKY_TLDS = %w[dev app page zip mov local].freeze
+
+    # A warning string if the tld looks risky, else nil. (.localhost / .test are safe.)
+    def tld_warning
+      last = tld.split(".").last
+      return unless RISKY_TLDS.include?(last)
+
+      "tld \".#{last}\" is a real/reserved TLD — prefer \".localhost\" so you don't intercept real traffic"
+    end
+
     def self.read_file(dir)
       json = File.join(dir, "portless.json")
       return JSON.parse(File.read(json)) if File.exist?(json)

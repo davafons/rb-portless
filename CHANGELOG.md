@@ -6,7 +6,19 @@ All notable changes to this project are documented here. The format follows
 
 ## [0.3.0]
 
+### Fixed / hardened
+
+- **Health probes can't hang.** Added a read timeout to the TLS and plain probes
+  so a port that accepts but never answers no longer blocks `discover_port`.
+
 ### Added
+
+- **Risky-TLD warning.** Warn when the configured `tld` ends in a real/reserved
+  TLD (`dev`, `app`, `local`, …) that could intercept live traffic.
+- **More tests** — health probes and privilege logic. (Verified manually, since
+  the Async proxy can't be driven in-process without deadlock: HTTP/HTTPS/HTTP-2
+  forwarding, wildcard routing, and the **WebSocket upgrade relay** / ActionCable.)
+
 
 - **Startup banner.** Running a dev server through rb-portless now prints a clear
   banner with the named URL(s) it's reachable at — not just `127.0.0.1:port`.

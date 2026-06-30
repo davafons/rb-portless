@@ -31,6 +31,13 @@ class SmokeTest < Minitest::Test
     assert_equal({ "web" => "bin/rails server", "api" => "node a.js" }, config.apps)
   end
 
+  def test_config_warns_only_on_risky_tlds
+    assert_nil Portless::Config.new({ "name" => "x", "tld" => "localhost" }, Dir.pwd).tld_warning
+    assert_nil Portless::Config.new({ "name" => "x", "tld" => "x.localhost" }, Dir.pwd).tld_warning
+    refute_nil Portless::Config.new({ "name" => "x", "tld" => "dev" }, Dir.pwd).tld_warning
+    refute_nil Portless::Config.new({ "name" => "x", "tld" => "x.local" }, Dir.pwd).tld_warning
+  end
+
   def test_route_store_add_remove_roundtrip
     store = Portless::RouteStore.new
     store.add(hostname: "x.localhost", port: 4123, pid: Process.pid)

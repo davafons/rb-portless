@@ -21,6 +21,7 @@ module Portless
       command = Frameworks.inject(command, port) # --port/--host for vite/astro/etc.
       hostname = @config.hostname
 
+      warn "rb-portless: #{@config.tld_warning}" if @config.tld_warning
       ensure_trusted if @config.tls
       proxy_port = Daemon.ensure_running(tls: @config.tls)
       @route_store.add(hostname: hostname, port: port, pid: Process.pid, force: true)

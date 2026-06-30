@@ -2,6 +2,7 @@
 
 require "socket"
 require "openssl"
+require "timeout"
 
 module Portless
   # "Is *our* proxy on this port?" — every proxied response carries the
@@ -26,7 +27,8 @@ module Portless
       ssl.sync_close = true
       ssl.connect
       ssl.write(REQUEST)
-      marker?(ssl.read(4096))
+      # Read timeout too — a port that accepts but never answers must not hang us.
+      marker?(Timeout.timeout(timeout) { ssl.read(4096) })
     rescue StandardError
       false
     ensure
@@ -38,7 +40,7 @@ module Portless
       Socket.tcp("127.0.0.1", port, connect_timeout: timeout) do |sock|
         sock.write(REQUEST)
         sock.close_write
-        marker?(sock.read(4096))
+        marker?(Timeout.timeout(timeout) { sock.read(4096) })
       end
     rescue StandardError
       false
