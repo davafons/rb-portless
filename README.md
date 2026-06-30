@@ -112,16 +112,35 @@ anything, same as portless), and each degrades gracefully if the tool is absent:
 | Command | Does |
 | --- | --- |
 | `run <cmd>` | run a dev server through the proxy |
+| `<name> <cmd>` | shorthand for `run --name <name> <cmd>` |
 | `proxy start \| stop` | manage the proxy daemon |
 | `trust` | install the local CA into the OS trust store |
 | `service install \| uninstall \| status` | bind the privileged port at boot (launchd/systemd) |
-| `alias <name> <port>` | a static route (Docker, Postgres, …) |
-| `get <name>` | print a name's URL (for `$(rb-portless get api)`) |
-| `list` | show active routes |
+| `alias <name> <port> [--force]` | a static route (Docker, Postgres, …); `--remove` to drop it |
+| `get <name> [--no-worktree]` | print a name's URL (for `$(rb-portless get api)`) |
+| `list` | show active routes (with any tailscale/ngrok URLs) |
 | `hosts sync \| clean` | manage `/etc/hosts` (Safari / non-`.localhost` TLDs) |
 | `doctor` | diagnose setup |
-| `prune` | reap stale routes |
+| `prune [--force]` | reap stale routes and kill the orphaned dev server (`--force` = SIGKILL) |
 | `clean` | stop the proxy, untrust the CA, remove all state |
+
+Every subcommand takes `--help`. `rb-portless <cmd> --help` prints command-specific
+help.
+
+### Run flags
+
+| Flag | Does |
+| --- | --- |
+| `--name <name>` | override the inferred hostname |
+| `--app-port <n>` | pin the backend port (else a random 4000–4999) |
+| `--force` | take over a route already held by another `run` |
+| `--lan [--ip <addr>]` | also serve on the LAN as `<name>.local` (mDNS) |
+| `--ngrok` / `--tailscale` / `--funnel` | share publicly |
+
+In a **git worktree** linked off a non-default branch, the branch name is prepended
+as a subdomain — `feature/auth` → `https://auth.<name>.localhost` — so every worktree
+gets a distinct URL. Pass `--no-worktree` (on `get`) to skip it. Set **`PORTLESS=0`**
+(`false`/`skip`) to run the command directly without the proxy.
 
 ## Rails
 
