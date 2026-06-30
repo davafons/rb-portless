@@ -164,6 +164,29 @@ boundary). For ports < 1024 it re-execs under `sudo` so the elevated process can
 bind the socket, then hands ownership of state files back to you. See
 [`AGENTS.md`](AGENTS.md) for the full architecture.
 
+## Compared to portless (Node)
+
+The mental model is identical — `run` wraps your dev command, the proxy
+auto-starts, named `.localhost` URLs replace ports. The only Ruby-world addition
+is the one-line `require "portless/rails"` to satisfy Rails' host authorization.
+
+| | **portless (Node)** | **rb-portless (Ruby/Rails)** |
+|---|---|---|
+| Install | `npm i -g portless` | `gem install rb-portless` (or Gemfile dev group) |
+| Run a server | `portless run next dev` | `rb-portless run bin/rails server` |
+| Run the dev orchestrator | `portless` (runs `"dev"` script) | `rb-portless run bin/dev` (wraps Foreman) |
+| Bake into the project | `"dev": "portless run next dev"` → `npm run dev` | put `rb-portless run` in `bin/dev`, or use the binstub |
+| Name the URL | `portless myapp …` / `portless.json` | `portless.json` `{ "name": "myapp" }` (else dir/git root) |
+| Wildcard tenant subdomains | `tld` config | `portless.json` `{ "tld": "myapp.localhost" }` → `*.myapp.localhost` |
+| Pin the backend port | `--app-port` / `appPort` | `appPort` in `portless.json` |
+| Framework port injection | vite/astro/etc. auto | same (Rails/puma respect `PORT` natively) |
+| HTTPS trust | auto on first run (+ `portless trust`) | `rb-portless trust` (one-time) |
+| **Host allowlist** | not needed | **`gem "rb-portless", require: "portless/rails"`** (Rails-only) |
+| Privileged 443 bind | sudo re-exec (auto) | sudo re-exec (auto), `:1355` fallback |
+| Bind at boot (no sudo) | `portless service install` | `rb-portless service install` |
+| Inspect / manage | `portless list / doctor / clean` | `rb-portless list / doctor / clean` |
+| Static route (DB, etc.) | `portless alias pg 5432` | `rb-portless alias pg 5432` |
+
 ## Contributing
 
 ```bash
