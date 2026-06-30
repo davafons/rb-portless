@@ -16,7 +16,11 @@ All notable changes to this project are documented here. The format follows
   detects the LAN IP, registers `<name>.local`, and publishes it over mDNS
   (`dns-sd`/`avahi-publish`). `--ip` overrides the detected address.
 - **Public sharing (experimental).** `--ngrok`, `--tailscale`, `--funnel` expose
-  the app via ngrok / your tailnet. Degrade gracefully when the tool is absent.
+  the app via ngrok / your tailnet (their CLIs, installed separately). Degrade
+  gracefully when the tool is absent. Tailscale is **non-destructive**: it reads
+  `tailscale serve status`, picks a free HTTPS port (never clobbering your
+  existing serve/funnel config), registers with `--yes`, and removes only the
+  port it created on exit — mirroring portless's port-conflict handling.
 
 ## [0.2.0]
 

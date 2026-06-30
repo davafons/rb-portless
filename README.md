@@ -95,7 +95,17 @@ rb-portless run --ngrok bin/dev        # https://xxxx.ngrok.app
 rb-portless run --tailscale bin/dev    # your-machine.tailnet.ts.net
 rb-portless run --funnel bin/dev       # tailscale Funnel (public)
 ```
-Each degrades gracefully if the tool isn't installed.
+
+These use the tools' own CLIs — **install them separately** (we don't bundle
+anything, same as portless), and each degrades gracefully if the tool is absent:
+- **ngrok** — install the `ngrok` CLI and configure an authtoken (free account).
+- **tailscale** — install `tailscale`, be logged into a tailnet, and enable HTTPS
+  certificates (and Funnel, for `--funnel`) in your tailnet settings.
+
+> **Your tailnet config is safe.** rb-portless reads `tailscale serve status`,
+> picks a **free** HTTPS port (never one you're already serving on), registers
+> with `--yes`, and on exit turns off **only the port it created** — it never
+> touches your existing `serve`/`funnel` setup.
 
 ## Commands
 

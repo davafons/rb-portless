@@ -16,4 +16,23 @@ class ShareTest < Minitest::Test
       assert_nil Portless::Share::Tailscale.start(backend_port: 4321)
     end
   end
+
+  # Safety: never reuse a port the user's existing serve config already occupies.
+  def test_tailscale_picks_first_free_port
+    Portless::Share::Tailscale.stub(:used_serve_ports, []) do
+      assert_equal 443, Portless::Share::Tailscale.available_port(funnel: false)
+    end
+    Portless::Share::Tailscale.stub(:used_serve_ports, [ 443 ]) do
+      assert_equal 8443, Portless::Share::Tailscale.available_port(funnel: false)
+    end
+    Portless::Share::Tailscale.stub(:used_serve_ports, [ 443, 8443 ]) do
+      assert_equal 8444, Portless::Share::Tailscale.available_port(funnel: false)
+    end
+  end
+
+  def test_tailscale_funnel_pool_exhausts_to_nil
+    Portless::Share::Tailscale.stub(:used_serve_ports, [ 443, 8443, 10_000 ]) do
+      assert_nil Portless::Share::Tailscale.available_port(funnel: true)
+    end
+  end
 end
