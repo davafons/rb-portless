@@ -54,6 +54,8 @@ module Portless
         return spawn_detached(port: Constants::FALLBACK_PROXY_PORT, tls: tls)
       end
 
+      warn "rb-portless: binding :#{port} needs sudo (it's a privileged port) — " \
+           "enter your password to serve #{tls ? 'HTTPS' : 'HTTP'} without a port number"
       ok = Privilege.reexec_with_sudo([ "proxy", "start", "--port", port.to_s, tls ? "--tls" : "--no-tls" ])
       return wait_until_running(port) if ok
 

@@ -64,6 +64,7 @@ injected as `PORT`; the proxy routes the named host to it.
 - **Phase 2 ✅** HTTP/2, full command surface (doctor/clean/prune/alias/get/hosts),
   boot service (launchd/systemd), daemon lifecycle.
 - **Phase 3 ✅ (partial)** framework `--port`/`--host` injection, Linux CA trust,
+  Firefox/Chrome NSS trust (`certutil` into each profile + `~/.pki/nssdb`),
   optional `portless/rails` railtie.
 
 - **Phase 4 ✅** startup banner; monorepo multi-app (`apps` map); LAN mode

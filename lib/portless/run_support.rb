@@ -8,13 +8,30 @@ module Portless
     private
 
     def child_env(port, url)
-      {
+      base = {
         "PORT" => port.to_s,
         "HOST" => "127.0.0.1",
         "PORTLESS_URL" => url,
         # Let the app's own server-side TLS verification trust our CA.
         "SSL_CERT_FILE" => (File.exist?(State.ca_cert) ? State.ca_cert : nil)
       }.compact
+      # Our own bundle (rb-portless is loaded via the app's Bundler binstub) must
+      # not leak into the dev command — a foreman-style `bin/dev` isn't in the
+      # app Gemfile and each Procfile process re-enters Bundler via its binstub.
+      unbundled_overrides.merge(base)
+    end
+
+    # ENV deltas that undo Bundler for the child (a nil value unsets the key).
+    # Empty when we're not running under Bundler at all.
+    def unbundled_overrides
+      return {} unless defined?(Bundler) && Bundler.respond_to?(:unbundled_env)
+
+      target = Bundler.unbundled_env
+      (ENV.keys | target.keys).each_with_object({}) do |key, deltas|
+        deltas[key] = target[key] if ENV[key] != target[key]
+      end
+    rescue StandardError
+      {}
     end
 
     def display_url(hostname, proxy_port)
