@@ -17,6 +17,7 @@ module Portless
       raise Error, "nothing to run — pass a command, e.g. portless-rb run bin/dev" if command.empty?
 
       port = @config.app_port&.to_i || FreePort.find
+      command = Frameworks.inject(command, port) # --port/--host for vite/astro/etc.
       hostname = @config.hostname
       url = "#{@config.tls ? 'https' : 'http'}://#{hostname}"
 

@@ -4,10 +4,22 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.1.0] — first release
+
+The full portless workflow for Ruby, validated end-to-end against a real Rails
+app (`portless-rb run bin/rails server` → `https://*.shirabe.org.localhost`).
 
 ### Added
 
+- **HTTP/2** with HTTP/1.1 fallback (server-side ALPN negotiation).
+- **Commands:** `run`, `proxy start|stop`, `trust`, `service install|uninstall|status`,
+  `alias`, `get`, `list`, `hosts sync|clean`, `doctor`, `prune`, `clean`.
+- **Boot service** — launchd (macOS) / systemd (Linux) for a no-prompt
+  privileged bind at boot.
+- **CA trust** on macOS (login keychain) and Linux (distro anchors).
+- **Framework `--port`/`--host` injection** for Vite, Astro, Angular, etc.
+- Optional **Rails railtie** (`require "portless/rails"`) that whitelists
+  `*.localhost` dev hosts.
 - **Phase 1 — core.** `portless-rb run <cmd>` runs a dev server behind a local
   HTTPS reverse proxy reachable at `https://<name>.localhost`:
   - async-http TLS proxy with per-host SNI certs, Host + wildcard routing

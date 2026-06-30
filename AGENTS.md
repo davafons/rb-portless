@@ -43,20 +43,32 @@ injected as `PORT`; the proxy routes the named host to it.
 | `certs.rb` | OpenSSL CA + per-host SNI leaf certs | certs.ts |
 | `trust.rb` | OS trust store install/remove | certs.ts trustCA |
 | `proxy.rb` | async-http reverse proxy (h1/h2/tls/ws) | proxy.ts |
+| `daemon.rb` | proxy start/stop, sudo bind, 1355 fallback | cli.ts handleProxy |
+| `service.rb` | launchd / systemd boot service | service.ts |
+| `frameworks.rb` | --port/--host injection (vite/astro/…) | cli-utils.ts |
 | `runner.rb` | run cmd: port→env→spawn→register→supervise | cli.ts runApp |
+| `rails.rb` | opt-in railtie (whitelist *.localhost in dev) | — |
 | `cli.rb` | command dispatch | cli.ts main |
 
-## Build plan
+## Status
 
-- **Phase 0 (done):** scaffold + coordination layer (config, state, free_port,
-  route_store, health, privilege, hosts) + CLI dispatch skeleton.
-- **Phase 1:** HTTPS proxy on async-http (TLS+SNI, h1+ws, wildcard routing,
-  X-Forwarded-*, loop guard, routes watch), certs + macOS trust, runner, sudo
-  bind + 1355 fallback. Verify against shirabe at `https://*.shirabe.org.localhost`.
-- **Phase 2:** HTTP/2, full command surface (doctor/clean/prune/alias/get/hosts),
-  boot service (launchd/systemd/schtasks), daemon lifecycle.
-- **Phase 3:** LAN/mDNS, tailscale/ngrok, framework `--port` injection, multi-app
-  workspaces, Linux/Windows parity, optional `portless-rb/rails` railtie.
+- **Phase 0 ✅** scaffold + coordination layer (config, state, free_port,
+  route_store, health, privilege, hosts) + CLI dispatch.
+- **Phase 1 ✅** HTTPS proxy on async-http (TLS+SNI, h1+wildcard routing,
+  X-Forwarded-*, loop guard), certs + macOS trust, runner, sudo bind + 1355
+  fallback. **Verified against shirabe** at `https://*.shirabe.org.localhost`.
+- **Phase 2 ✅** HTTP/2, full command surface (doctor/clean/prune/alias/get/hosts),
+  boot service (launchd/systemd), daemon lifecycle.
+- **Phase 3 ✅ (partial)** framework `--port`/`--host` injection, Linux CA trust,
+  optional `portless/rails` railtie.
+
+### Roadmap (not yet built)
+
+- LAN mode (mDNS `.local` publishing) for phones/tablets.
+- Public sharing via `tailscale serve|funnel` and `ngrok`.
+- Monorepo multi-app (one proxy, many named apps).
+- Windows CA trust + Task Scheduler service.
+- WebSocket upgrade relay hardening + HTTP/2 to the backend.
 
 ## Conventions
 

@@ -16,6 +16,7 @@ require_relative "portless/trust"
 require_relative "portless/proxy"
 require_relative "portless/daemon"
 require_relative "portless/service"
+require_relative "portless/frameworks"
 require_relative "portless/runner"
 require_relative "portless/cli"
 
