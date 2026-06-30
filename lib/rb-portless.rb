@@ -4,9 +4,12 @@
 # of Vercel's portless). See AGENTS.md for the architecture map.
 require_relative "portless/version"
 require_relative "portless/constants"
+require_relative "portless/colors"
 require_relative "portless/state"
+require_relative "portless/worktree"
 require_relative "portless/config"
 require_relative "portless/free_port"
+require_relative "portless/port_owner"
 require_relative "portless/route_store"
 require_relative "portless/health"
 require_relative "portless/privilege"
@@ -32,6 +35,14 @@ module Portless
 
   # Raised when a privileged action can't run non-interactively (no TTY / CI).
   class NonInteractiveError < Error; end
+
+  # Raised when a hostname is already served by a different live owner and the
+  # caller didn't pass --force. Mirrors portless's RouteConflictError.
+  class RouteConflictError < Error; end
+
+  # `PORTLESS=0|false|skip` runs the command straight through, no proxy/route —
+  # the bypass portless documents for CI or one-off plain runs.
+  def self.skip_proxy? = %w[0 false skip].include?(ENV["PORTLESS"].to_s.downcase)
 
   # Is an executable on PATH? (For optional external tools: dns-sd, ngrok, …)
   def self.which(bin)
