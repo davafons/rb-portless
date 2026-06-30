@@ -1,13 +1,16 @@
 # frozen_string_literal: true
 
-# Opt-in Rails integration: `require "portless/rails"` (e.g. in config/application.rb
-# or via `gem "portless-rb", require: "portless/rails"` in the dev group). It just
-# whitelists *.localhost hosts in development so portless-rb's named subdomains
-# aren't blocked by Action Dispatch host authorization. Everything else (PORT,
-# X-Forwarded-*) Rails already handles for a loopback proxy.
+# Opt-in Rails integration. Add to your Gemfile's dev group:
 #
-# Lightweight on purpose — does NOT load the proxy stack into your app.
+#   gem "portless-rb", require: "portless/rails"
+#
+# It auto-detects when the app is being run through `portless-rb run` (via the
+# PORTLESS_URL env the runner injects) and *only then* whitelists the matching
+# `*.localhost` hosts in development — so Action Dispatch host authorization
+# doesn't 403 your named subdomains. Run Rails normally (not under portless-rb)
+# and nothing is touched. Lightweight: does NOT load the proxy stack.
 require "rails/railtie"
+require_relative "rails_hosts"
 
 module Portless
   class Railtie < ::Rails::Railtie
@@ -15,10 +18,9 @@ module Portless
       next unless defined?(Rails) && Rails.env.development?
       next unless app.config.respond_to?(:hosts)
 
-      # Rails wraps a Regexp as /\A<re>(:port)?\z/, so this must match the whole
-      # host (any depth of *.localhost) and leave the port to Rails.
-      matcher = /.+\.localhost/
-      app.config.hosts << matcher unless app.config.hosts.include?(matcher)
+      RailsHosts.allowed.each do |pattern|
+        app.config.hosts << pattern unless app.config.hosts.include?(pattern)
+      end
     end
   end
 end

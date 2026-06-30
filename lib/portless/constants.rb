@@ -2,9 +2,10 @@
 
 module Portless
   module Constants
-    # Where all coordination state lives (routes, CA, pid/port markers). Mirrors
-    # portless's ~/.portless; overridable for tests / isolation.
-    USER_STATE_DIR = File.expand_path(ENV["PORTLESS_STATE_DIR"] || "~/.portless-rb")
+    # Default location for all coordination state (routes, CA, pid/port markers).
+    # Mirrors portless's ~/.portless; State.dir reads PORTLESS_STATE_DIR at call
+    # time to allow per-run overrides (tests, the sudo'd daemon).
+    DEFAULT_STATE_DIR = "~/.portless-rb"
 
     # Default proxy ports: 443 for HTTPS (the default), 80 for --no-tls. When the
     # privileged port can't be bound (sudo denied), we fall back to 1355.

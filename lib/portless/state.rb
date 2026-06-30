@@ -10,7 +10,9 @@ module Portless
   module State
     module_function
 
-    def dir = Constants::USER_STATE_DIR
+    # Read the env at call time so an override (tests, or the PORTLESS_STATE_DIR
+    # we pass to the sudo'd daemon) is always respected.
+    def dir = File.expand_path(ENV["PORTLESS_STATE_DIR"] || Constants::DEFAULT_STATE_DIR)
 
     def path(name) = File.join(dir, name)
 

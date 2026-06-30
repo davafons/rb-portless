@@ -4,15 +4,14 @@ require_relative "test_helper"
 
 class CertsTest < Minitest::Test
   def setup
+    @prev_dir = ENV["PORTLESS_STATE_DIR"]
     @dir = Dir.mktmpdir
-    ENV["PORTLESS_STATE_DIR"] = @dir
-    # Constants memoized USER_STATE_DIR at load, so point State at the temp dir.
-    Portless::State.define_singleton_method(:dir) { ENV["PORTLESS_STATE_DIR"] }
+    ENV["PORTLESS_STATE_DIR"] = @dir # State.dir reads this at call time
     @certs = Portless::Certs.new
   end
 
   def teardown
-    Portless::State.singleton_class.send(:remove_method, :dir)
+    ENV["PORTLESS_STATE_DIR"] = @prev_dir
     FileUtils.remove_entry(@dir)
   end
 

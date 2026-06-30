@@ -18,8 +18,10 @@ app (`portless-rb run bin/rails server` → `https://*.shirabe.org.localhost`).
   privileged bind at boot.
 - **CA trust** on macOS (login keychain) and Linux (distro anchors).
 - **Framework `--port`/`--host` injection** for Vite, Astro, Angular, etc.
-- Optional **Rails railtie** (`require "portless/rails"`) that whitelists
-  `*.localhost` dev hosts.
+- Optional **Rails railtie** (`gem "portless-rb", require: "portless/rails"`)
+  that **auto-detects** when the app runs under `portless-rb` (via `PORTLESS_URL`)
+  and only then whitelists the matching `*.localhost` dev hosts — zero-config,
+  and a no-op when you run Rails normally.
 - **Phase 1 — core.** `portless-rb run <cmd>` runs a dev server behind a local
   HTTPS reverse proxy reachable at `https://<name>.localhost`:
   - async-http TLS proxy with per-host SNI certs, Host + wildcard routing

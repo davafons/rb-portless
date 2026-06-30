@@ -86,14 +86,73 @@ the one app — ideal for subdomain-per-tenant apps.
 
 Rails is first-class: it respects `PORT` and trusts the loopback proxy, so
 `X-Forwarded-Host/Proto/Port` flow through and `request.host`, subdomains, and
-generated URLs all reflect `https://<name>.localhost`. Subdomain-per-tenant apps
-work out of the box via the wildcard `tld`.
+generated URLs all reflect `https://<name>.localhost`.
+
+**Zero-config setup.** Add the gem to your dev group with the railtie required —
+that's the only project change:
+
+```ruby
+# Gemfile
+group :development do
+  gem "portless-rb", require: "portless/rails"
+end
+```
+
+```jsonc
+// portless.json  (optional — name defaults to the dir/git root)
+{ "name": "myapp", "tld": "myapp.localhost" }
+```
 
 ```bash
-echo '{ "name": "myapp", "tld": "myapp.localhost" }' > portless.json
-portless-rb run bin/rails server
-# tenant.myapp.localhost, admin.myapp.localhost, … all reach your app
+portless-rb trust            # one-time: trust the local CA
+portless-rb run bin/dev      # → https://myapp.localhost
 ```
+
+That's it. The railtie **auto-detects when you're running under `portless-rb`**
+(via the `PORTLESS_URL` env the runner injects) and only then whitelists your
+`*.localhost` hosts in development — so Action Dispatch host authorization doesn't
+`403` your named subdomains. Run `bin/dev` normally and nothing is touched.
+
+> **`bin/dev` note:** `portless-rb run bin/dev` wraps Foreman. Foreman passes the
+> injected `PORT` to the **first** process in `Procfile.dev` — keep `web:` first
+> (the Rails default) so the server binds the port the proxy registered.
+
+Prefer not to add the gem? Skip the railtie and allow the host yourself:
+
+```ruby
+# config/environments/development.rb
+config.hosts << /.+\.localhost/
+```
+
+## Use cases
+
+**Kill the port.** Stop memorizing `:3000` / `:3001`. One stable HTTPS URL per
+app, the same every day:
+
+```bash
+portless-rb run bin/dev      # https://myapp.localhost
+```
+
+**Subdomain-per-tenant apps** (the headline). A multi-label `tld` gives every
+subdomain to one app, so multi-tenant / Classroom-style routing works locally
+exactly like production:
+
+```jsonc
+{ "name": "myapp", "tld": "myapp.localhost" }
+// kobe.myapp.localhost, osaka.myapp.localhost, admin.myapp.localhost → your app
+```
+
+**Several services at once.** Give each its own name; route non-portless
+processes (a database, a container) with a static `alias`:
+
+```bash
+portless-rb run bin/dev                 # https://web.localhost
+portless-rb run -- node api/server.js   # https://api.localhost   (in another tab)
+portless-rb alias pg 5432               # https://pg.localhost     (static)
+```
+
+**HTTPS that matches prod.** Develop against real TLS + HTTP/2, so secure-cookie
+and `X-Forwarded-Proto` behaviour is the same locally as in production.
 
 ## How it works
 
