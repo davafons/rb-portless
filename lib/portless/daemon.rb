@@ -12,10 +12,58 @@ module Portless
 
     def ensure_running(tls:)
       port = Health.discover_port
-      return port if port
+      return refresh_stale(port, tls: tls) if port
 
       start(tls: tls)
       Health.discover_port
+    end
+
+    # The daemon outlives gem updates — after a `bundle update` the process on
+    # :443 may still be running last week's code. Compare the version it stamps
+    # on its responses with ours and offer to restart it; the reverse mismatch
+    # (a newer proxy) means this project's gem is the stale side.
+    def refresh_stale(port, tls:)
+      running = Health.proxy_version(port)
+      case version_action(running, VERSION)
+      when :restart
+        if restart_consented?(running)
+          restart(tls: tls, port: port)
+          port = Health.discover_port || port
+        else
+          warn "rb-portless: keeping the v#{running} proxy — run `rb-portless proxy restart` when ready"
+        end
+      when :update_gem
+        warn "rb-portless: the proxy is v#{running} but this project loads rb-portless v#{VERSION} — " \
+             "update the gem (`bundle update rb-portless`) so they match"
+      end
+      port
+    end
+
+    # nil → proxy unreadable or versions equal: leave it alone.
+    def version_action(running, current)
+      return nil unless running
+
+      case Gem::Version.new(running) <=> Gem::Version.new(current)
+      when -1 then :restart
+      when 1 then :update_gem
+      end
+    rescue ArgumentError
+      nil
+    end
+
+    def restart_consented?(running)
+      warn "rb-portless: the running proxy is v#{running}; this rb-portless is v#{VERSION}"
+      return false unless Privilege.interactive?
+
+      $stderr.print "rb-portless: restart the proxy to pick up the update? [Y/n] "
+      !$stdin.gets.to_s.strip.downcase.start_with?("n")
+    end
+
+    def restart(tls:, port: nil)
+      port ||= Health.discover_port
+      stop
+      wait_until_stopped(port) if port
+      start(tls: tls, port: port)
     end
 
     # foreground: become the daemon (binds the port, blocks). Otherwise
@@ -34,8 +82,12 @@ module Portless
     end
 
     def stop
-      pid = read_pid
+      pid = read_pid || discovered_pid
       unless pid
+        # A proxy answers but we can't see who owns the port (a root daemon
+        # whose marker files were lost) — retry the whole stop under sudo.
+        return Privilege.reexec_with_sudo([ "proxy", "stop" ]) if Health.discover_port && !Privilege.root?
+
         warn "rb-portless: no proxy is running"
         return
       end
@@ -46,6 +98,14 @@ module Portless
     rescue Errno::EPERM
       # Proxy owned by root (privileged bind) — stop it with sudo.
       Privilege.reexec_with_sudo([ "proxy", "stop" ]) unless Privilege.root?
+    end
+
+    # Fallback when the pid marker is missing: whoever listens on the port the
+    # proxy answered from (lsof only sees our own processes unless root).
+    def discovered_pid
+      port = Health.discover_port or return nil
+
+      PortOwner.listeners(port).find { |pid| pid != Process.pid }
     end
 
     def start_privileged(port:, tls:)
@@ -82,6 +142,17 @@ module Portless
         sleep 0.2
       end
       State.fix_ownership
+      true
+    end
+
+    # A restart can't rebind the port until the old daemon has let go of it.
+    def wait_until_stopped(port, timeout: 10)
+      deadline = monotonic + timeout
+      while Health.proxy_running?(port)
+        return false if monotonic > deadline
+
+        sleep 0.2
+      end
       true
     end
 

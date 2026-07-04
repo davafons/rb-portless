@@ -24,7 +24,7 @@ module Portless
       proxy_port = Daemon.ensure_running(tls: @config.tls)
       @apps = @config.apps.map { |name, command| start_app(name, command, proxy_port) }
 
-      Banner.multi(apps: @apps)
+      Banner.multi(apps: @apps, proxy_version: Health.proxy_version(proxy_port))
       install_signal_handlers
       Process.waitall
     ensure

@@ -36,7 +36,7 @@ module Portless
       rows.concat(lan_rows(port, proxy_port))
       rows.concat(share_rows(hostname, port))
       record_share_urls(hostname, port) # so `rb-portless list` shows the public URLs
-      Banner.app(rows: rows, backend_port: port)
+      Banner.app(rows: rows, backend_port: port, proxy_version: Health.proxy_version(proxy_port))
 
       status = supervise(command, port, url)
       exit(status)

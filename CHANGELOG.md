@@ -4,6 +4,59 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.0]
+
+### Added
+
+- **Stale-proxy detection + `proxy restart`.** The proxy daemon outlives gem
+  updates, so a `bundle update` could leave last week's code holding :443
+  indefinitely. The proxy now stamps its version on every response (the health
+  header carries `VERSION` instead of a bare `1`), and `run` compares it with
+  the loaded gem: an older proxy prompts `restart the proxy? [Y/n]` (warn-only
+  without a TTY); a *newer* proxy warns that the project's gem is the stale
+  side. `rb-portless proxy restart` does the stop → wait → start dance manually,
+  and the startup banner always prints both sides (`v0.4.0 · proxy v0.4.0`) so a
+  drifting daemon is visible at a glance.
+
+- **`default_url_options` under portless.** The Rails integration now points
+  `config.action_mailer.default_url_options` and the router's default URL
+  options at `https://<name>.localhost` whenever the app runs under rb-portless
+  (dev only). Mailers and jobs — which build links without a request — stop
+  emitting stale `localhost:<port>` URLs, so apps no longer need to hardcode a
+  dev host. Untouched when not running under rb-portless.
+- **Action Cable origin allow-listing under portless.** The integration adds the
+  portless host and its subdomains to `config.action_cable.allowed_request_origins`
+  (dev only), so a WebSocket handshake from `https://<name>.localhost` isn't
+  rejected and Cable connects without extra config.
+
+### Fixed
+
+- **HTTP/2 cookie splitting corrupted the session.** Browsers speaking HTTP/2
+  may send one `cookie` header field per cookie (RFC 9113 §8.2.3); the proxy
+  forwarded them as repeated HTTP/1.1 `cookie:` lines, which the backend
+  (e.g. Puma) joins with `", "`. Rack then parses that single mangled field and
+  every cookie but the first is lost — silently emptying the Rails session and
+  breaking CSRF on every form POST. The proxy now concatenates split cookie
+  fields into one `"; "`-joined header, as an h2→h1 intermediary must.
+- **WebSockets from HTTP/2 browsers never reached the backend.** Firefox (and
+  any client using RFC 8441) opens `wss://` as an h2 *extended CONNECT* with
+  `:protocol: websocket`; the proxy forwarded the CONNECT verb raw, which the
+  HTTP/1.1 backend rejects as a parse error — Action Cable / Turbo Streams were
+  dead through the proxy. The proxy now translates: forwards it as `GET` +
+  `Upgrade` with a synthesized `Sec-WebSocket-Key` (extended CONNECT carries no
+  nonce, h1 backends demand one), and maps the backend's `101 Switching
+  Protocols` back to the `200` h2 requires. Verified end-to-end: an h2 extended
+  CONNECT through the old proxy → 400, through the fixed proxy → 200 with
+  Action Cable's welcome frame relayed.
+- **A failed second `proxy start` left the live daemon unstoppable.** The
+  latecomer overwrote the running daemon's pid/port marker files, then deleted
+  them in its own crash cleanup — after which `proxy stop` claimed no proxy was
+  running while a (often root-owned) daemon still held the port. A foreground
+  start now refuses the port when a proxy already answers on it, cleanup only
+  reaps markers the exiting process owns, and `proxy stop` falls back to
+  port-owner discovery (re-trying under sudo for a root daemon) when the
+  markers are gone.
+
 ## [0.3.1]
 
 ### Changed (internal — no behaviour change)

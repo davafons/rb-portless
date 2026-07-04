@@ -14,6 +14,20 @@ class HealthTest < Minitest::Test
     assert(result.nil? || result.is_a?(Integer))
   end
 
+  def test_version_from_reads_the_stamped_version
+    assert_equal "0.4.0", Portless::Health.version_from("HTTP/1.1 404 Not Found\r\nx-rb-portless: 0.4.0\r\n\r\n")
+  end
+
+  # Pre-0.4 proxies stamped a bare "1" — must read as older than any release.
+  def test_version_from_treats_the_legacy_marker_as_ancient
+    assert_equal "0.0.0", Portless::Health.version_from("HTTP/1.1 404 Not Found\r\nx-rb-portless: 1\r\n\r\n")
+  end
+
+  def test_version_from_is_nil_without_the_header
+    assert_nil Portless::Health.version_from("HTTP/1.1 200 OK\r\nserver: nginx\r\n\r\n")
+    assert_nil Portless::Health.version_from(nil)
+  end
+
   def free_port
     server = TCPServer.new("127.0.0.1", 0)
     port = server.addr[1]

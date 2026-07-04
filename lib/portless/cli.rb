@@ -92,9 +92,10 @@ module Portless
       case args.first
       when "start"
         Daemon.start(tls: tls_flag(args), port: int_flag(args, "--port"), foreground: flag?("--foreground"))
-      when "stop" then Daemon.stop
-      when nil    then command_help("proxy")
-      else invalid_action!("proxy start|stop")
+      when "stop"    then Daemon.stop
+      when "restart" then Daemon.restart(tls: tls_flag(args), port: int_flag(args, "--port"))
+      when nil       then command_help("proxy")
+      else invalid_action!("proxy start|stop|restart")
       end
     end
 
@@ -282,7 +283,7 @@ module Portless
           rb-portless <name> <command>     run <command> at https://<name>.localhost
           rb-portless get <name>           print a service's URL (--no-worktree)
           rb-portless alias <name> <port>  static route for an unmanaged service
-          rb-portless proxy start|stop     manage the proxy daemon
+          rb-portless proxy start|stop|restart  manage the proxy daemon
           rb-portless trust                trust the local CA (HTTPS)
           rb-portless hosts sync|clean     manage /etc/hosts (Safari fallback)
           rb-portless list                 show active routes
@@ -326,7 +327,8 @@ module Portless
                      flags: [ [ "--force", "overwrite an existing route" ] ],
                      example: "rb-portless alias postgres 5432   # -> https://postgres.localhost" },
       "proxy"   => { summary: "Manage the proxy daemon.",
-                     usage: [ "proxy start [--no-tls] [--port <n>]", "proxy stop" ] },
+                     usage: [ "proxy start [--no-tls] [--port <n>]", "proxy stop",
+                              "proxy restart   (pick up an updated rb-portless)" ] },
       "trust"   => { summary: "Trust the local CA so HTTPS works without warnings.",
                      usage: [ "trust" ] },
       "hosts"   => { summary: "Manage the /etc/hosts block (Safari / non-.localhost TLDs).",

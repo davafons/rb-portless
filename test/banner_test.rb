@@ -14,6 +14,21 @@ class BannerTest < Minitest::Test
     assert_includes err, "127.0.0.1:4321"
   end
 
+  # Both sides of the version handshake are printed, matching or not — a stale
+  # daemon (old code in memory) is invisible without it.
+  def test_app_banner_shows_gem_and_proxy_versions
+    _out, err = capture_io do
+      Portless::Banner.app(rows: [], backend_port: 4321, proxy_version: Portless::VERSION)
+    end
+    assert_includes err, "v#{Portless::VERSION} · proxy v#{Portless::VERSION}"
+  end
+
+  def test_app_banner_omits_the_proxy_version_when_unknown
+    _out, err = capture_io { Portless::Banner.app(rows: [], backend_port: 4321) }
+    assert_includes err, "v#{Portless::VERSION}"
+    refute_includes err, "proxy v"
+  end
+
   def test_multi_banner_lists_every_app
     apps = [
       Portless::Multi::App.new(name: "web", url: "https://web.localhost"),

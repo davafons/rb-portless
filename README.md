@@ -113,7 +113,7 @@ anything, same as portless), and each degrades gracefully if the tool is absent:
 | --- | --- |
 | `run <cmd>` | run a dev server through the proxy |
 | `<name> <cmd>` | shorthand for `run --name <name> <cmd>` |
-| `proxy start \| stop` | manage the proxy daemon |
+| `proxy start \| stop \| restart` | manage the proxy daemon (`restart` picks up an updated gem) |
 | `trust` | install the local CA into the OS trust store |
 | `service install \| uninstall \| status` | bind the privileged port at boot (launchd/systemd) |
 | `alias <name> <port> [--force]` | a static route (Docker, Postgres, …); `--remove` to drop it |

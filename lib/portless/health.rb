@@ -16,7 +16,28 @@ module Portless
     REQUEST = "HEAD / HTTP/1.0\r\nHost: rb-portless.localhost\r\n\r\n"
 
     def proxy_running?(port, timeout: 1.0)
-      probe_tls(port, timeout) || probe_plain(port, timeout)
+      !probe(port, timeout).nil?
+    end
+
+    # The running proxy's version, read from the health header it stamps on
+    # every response. Nil when no proxy answers on the port.
+    def proxy_version(port, timeout: 1.0)
+      version_from(probe(port, timeout))
+    end
+
+    # Proxies since 0.4.0 stamp their version as the header value; older ones
+    # stamped a bare "1" — report those as "0.0.0" so any release compares newer.
+    def version_from(response)
+      value = response.to_s[/^#{Regexp.escape(Constants::HEALTH_HEADER)}:\s*(\S+)/i, 1]
+      return nil unless value
+
+      value.match?(/\A\d+\.\d+/) ? value : "0.0.0"
+    end
+
+    # The raw probe response when it's our proxy answering, else nil.
+    def probe(port, timeout)
+      response = probe_tls(port, timeout) || probe_plain(port, timeout)
+      marker?(response) ? response : nil
     end
 
     def probe_tls(port, timeout)
@@ -28,9 +49,9 @@ module Portless
       ssl.connect
       ssl.write(REQUEST)
       # Read timeout too — a port that accepts but never answers must not hang us.
-      marker?(Timeout.timeout(timeout) { ssl.read(4096) })
+      Timeout.timeout(timeout) { ssl.read(4096) }
     rescue StandardError
-      false
+      nil
     ensure
       ssl&.close
       socket&.close unless ssl
@@ -40,10 +61,10 @@ module Portless
       Socket.tcp("127.0.0.1", port, connect_timeout: timeout) do |sock|
         sock.write(REQUEST)
         sock.close_write
-        marker?(Timeout.timeout(timeout) { sock.read(4096) })
+        Timeout.timeout(timeout) { sock.read(4096) }
       end
     rescue StandardError
-      false
+      nil
     end
 
     def marker?(response) = response.to_s.downcase.include?(Constants::HEALTH_HEADER)
