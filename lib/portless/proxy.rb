@@ -6,6 +6,7 @@ require "async/http/client"
 require "async/http/endpoint"
 require "protocol/http/headers"
 require "protocol/http/body/buffered"
+require "securerandom"
 
 module Portless
   # The reverse proxy daemon (async-http: HTTP/1.1 + TLS + WebSockets; HTTP/2 in
@@ -30,6 +31,11 @@ module Portless
 
     def run
       State.ensure_dir!
+      # A second daemon on the same port would overwrite the live one's marker
+      # files, then wipe them on its own EADDRINUSE crash — leaving the survivor
+      # unstoppable by `proxy stop`. Refuse before touching any state.
+      raise Error, "a proxy is already running on :#{@port}" if Health.proxy_running?(@port)
+
       @certs.ensure_ca! if @tls
       write_markers
       install_signal_handlers
@@ -63,7 +69,10 @@ module Portless
       return error(508, "Proxy loop detected for #{host}.") if hops >= Constants::MAX_PROXY_HOPS
 
       response = client_for(route.port).call(build_forward(request, host, hops))
-      response.headers.add(Constants::HEALTH_HEADER, "1")
+      # The h1 backend accepts a WebSocket with 101 Switching Protocols, but
+      # HTTP/2 forbids 1xx finals — an extended-CONNECT success is a plain 2xx.
+      response.status = 200 if response.status == 101 && request.version == "HTTP/2"
+      response.headers.add(Constants::HEALTH_HEADER, VERSION)
       response
     rescue StandardError => e
       error(502, "Backend for #{host} is not responding (#{e.class}).")
@@ -77,16 +86,36 @@ module Portless
 
     def build_forward(request, host, hops)
       headers = Protocol::HTTP::Headers.new
+      cookies = []
       request.headers.each do |key, value|
-        headers.add(key, value) unless HOP_BY_HOP.include?(key.downcase)
+        next if HOP_BY_HOP.include?(key.downcase)
+
+        # HTTP/2 clients may split the cookie header into one field per cookie
+        # (RFC 9113 §8.2.3); an intermediary translating to HTTP/1.1 MUST
+        # concatenate them with "; " — otherwise the backend joins the repeated
+        # lines with "," and cookie parsing (split on ";") corrupts the values.
+        key.downcase == "cookie" ? cookies << value : headers.add(key, value)
       end
+      headers.add("cookie", cookies.join("; ")) unless cookies.empty?
       headers.set("x-forwarded-host", host.split(":").first)
       headers.set("x-forwarded-proto", @tls ? "https" : "http")
       headers.set("x-forwarded-port", @port.to_s)
       headers.add(HOP_HEADER, (hops + 1).to_s)
 
+      # HTTP/2 WebSockets arrive as extended CONNECT (RFC 8441, :protocol on the
+      # request); the HTTP/1.1 equivalent is GET + Upgrade, which the client
+      # layer emits from request.protocol. Forwarded raw, the CONNECT verb makes
+      # the backend's parser reject the stream. Extended CONNECT also drops
+      # Sec-WebSocket-Key (h2 needs no handshake nonce), but an h1 backend
+      # refuses an upgrade without one — synthesize it.
+      method = request.method
+      if method == "CONNECT" && request.protocol
+        method = "GET"
+        headers.set("sec-websocket-key", SecureRandom.base64(16)) if headers["sec-websocket-key"].nil?
+      end
+
       Protocol::HTTP::Request.new(
-        "http", host, request.method, request.path, request.version,
+        "http", host, method, request.path, request.version,
         headers, request.body, request.protocol
       )
     end
@@ -128,7 +157,7 @@ module Portless
       endpoint = Async::HTTP::Endpoint.parse("http://0.0.0.0:#{Constants::HTTP_PORT}")
       Async::HTTP::Server.for(endpoint) do |request|
         host = request_host(request).split(":").first
-        Protocol::HTTP::Response[302, { "location" => "https://#{host}#{request.path}", Constants::HEALTH_HEADER => "1" }, []]
+        Protocol::HTTP::Response[302, { "location" => "https://#{host}#{request.path}", Constants::HEALTH_HEADER => VERSION }, []]
       end.run
     rescue StandardError
       nil # port 80 taken / unavailable — non-fatal.
@@ -142,7 +171,7 @@ module Portless
       body = Protocol::HTTP::Body::Buffered.wrap("<!doctype html><meta charset=utf-8><title>rb-portless</title>" \
         "<body style='font:16px system-ui;padding:3rem;max-width:40rem;margin:auto'>" \
         "<h1>#{status}</h1><p>#{message}</p></body>")
-      Protocol::HTTP::Response[status, { "content-type" => "text/html; charset=utf-8", Constants::HEALTH_HEADER => "1" }, body]
+      Protocol::HTTP::Response[status, { "content-type" => "text/html; charset=utf-8", Constants::HEALTH_HEADER => VERSION }, body]
     end
 
     def write_markers
@@ -155,10 +184,18 @@ module Portless
       %w[INT TERM].each { |sig| trap(sig) { cleanup; exit(0) } }
     end
 
+    # Only reap markers we own — a crashing latecomer must never delete the
+    # live daemon's pid/port files.
     def cleanup
+      return unless marker_pid == Process.pid
+
       [ State.proxy_pid_file, State.proxy_port_file ].each { |f| File.delete(f) if File.exist?(f) }
     rescue StandardError
       nil
+    end
+
+    def marker_pid
+      Integer(File.read(State.proxy_pid_file).strip, exception: false) if File.exist?(State.proxy_pid_file)
     end
   end
 end

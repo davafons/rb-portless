@@ -19,7 +19,7 @@ class ProxyTest < Minitest::Test
   def test_unknown_host_is_404_stamped_as_ours
     res = @proxy.call(request("nope.localhost"))
     assert_equal 404, res.status
-    assert_equal "1", health(res)
+    assert_equal Portless::VERSION, health(res)
   end
 
   def test_exact_and_wildcard_routing_via_route_for
@@ -43,9 +43,63 @@ class ProxyTest < Minitest::Test
     @store.add(hostname: "demo.localhost", port: closed_port, pid: Process.pid)
     res = @proxy.call(request("demo.localhost"))
     assert_equal 502, res.status
-    assert_equal "1", health(res)
+    assert_equal Portless::VERSION, health(res)
   ensure
     @store.remove("demo.localhost", owner_pid: Process.pid)
+  end
+
+  # HTTP/2 clients may send one `cookie` field per cookie; forwarding them as
+  # repeated HTTP/1.1 lines makes the backend join them with "," and corrupts
+  # the values. build_forward must coalesce them into a single "; "-joined field.
+  def test_split_http2_cookie_fields_are_coalesced
+    list = Protocol::HTTP::Headers.new
+    list.add("cookie", "_session=abc")
+    list.add("cookie", "__profilin=p%3Dt")
+    req = Protocol::HTTP::Request.new("http", "demo.localhost", "POST", "/", nil, list)
+
+    fwd = @proxy.send(:build_forward, req, "demo.localhost", 0)
+    cookie_fields = fwd.headers.to_a.select { |key, _| key.downcase == "cookie" }
+
+    assert_equal 1, cookie_fields.size, "expected a single coalesced cookie field, not repeated lines"
+    assert_equal "_session=abc; __profilin=p%3Dt", cookie_fields.first.last
+  end
+
+  # An h2 WebSocket opens as extended CONNECT (RFC 8441); the h1 backend needs
+  # the classic GET + Upgrade instead — a raw CONNECT verb is a parse error.
+  def test_h2_websocket_connect_is_forwarded_as_a_get_upgrade
+    req = Protocol::HTTP::Request.new("https", "demo.localhost", "CONNECT", "/cable", "HTTP/2",
+                                      Protocol::HTTP::Headers.new, nil, "websocket")
+    fwd = @proxy.send(:build_forward, req, "demo.localhost", 0)
+    assert_equal "GET", fwd.method
+    assert_equal "websocket", fwd.protocol
+    # Extended CONNECT carries no handshake nonce; the h1 backend requires one.
+    refute_nil fwd.headers["sec-websocket-key"]
+  end
+
+  def test_a_true_connect_without_a_protocol_is_not_rewritten
+    req = Protocol::HTTP::Request.new("https", "demo.localhost", "CONNECT", nil, "HTTP/2",
+                                      Protocol::HTTP::Headers.new, nil, nil)
+    assert_equal "CONNECT", @proxy.send(:build_forward, req, "demo.localhost", 0).method
+  end
+
+  # A crashing latecomer (EADDRINUSE) must never reap the live daemon's marker
+  # files on its way out — that's what left root proxies unstoppable.
+  def test_cleanup_leaves_markers_owned_by_another_process
+    Portless::State.ensure_dir!
+    File.write(Portless::State.proxy_pid_file, "999999")
+    @proxy.send(:cleanup)
+    assert File.exist?(Portless::State.proxy_pid_file)
+  ensure
+    File.delete(Portless::State.proxy_pid_file) if File.exist?(Portless::State.proxy_pid_file)
+  end
+
+  def test_cleanup_reaps_our_own_markers
+    Portless::State.ensure_dir!
+    File.write(Portless::State.proxy_pid_file, Process.pid.to_s)
+    File.write(Portless::State.proxy_port_file, "8443")
+    @proxy.send(:cleanup)
+    refute File.exist?(Portless::State.proxy_pid_file)
+    refute File.exist?(Portless::State.proxy_port_file)
   end
 
   private
