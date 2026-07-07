@@ -4,6 +4,21 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.1]
+
+### Fixed
+
+- **Proxied apps could no longer verify public TLS certificates.** `run` set the
+  child's `SSL_CERT_FILE` to our local CA so the app would trust sibling
+  `.localhost` hosts — but that env var *replaces* OpenSSL's trust store rather
+  than extending it, so the app lost every public root and all outbound HTTPS
+  (payment APIs, S3, webhooks, exchange-rate feeds…) failed with `certificate
+  verify failed (unable to get local issuer certificate)`. `run` now hands apps
+  a combined bundle (the system's default roots **plus** our CA), assembled once
+  into `~/.rb-portless/ca-bundle.pem` and rebuilt when either input changes, so
+  apps trust the public web *and* our local hosts. Falls back to leaving
+  `SSL_CERT_FILE` unset when the CA or system roots can't be located.
+
 ## [0.4.0]
 
 ### Added

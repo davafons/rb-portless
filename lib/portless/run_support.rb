@@ -12,8 +12,10 @@ module Portless
         "PORT" => port.to_s,
         "HOST" => "127.0.0.1",
         "PORTLESS_URL" => url,
-        # Let the app's own server-side TLS verification trust our CA.
-        "SSL_CERT_FILE" => (File.exist?(State.ca_cert) ? State.ca_cert : nil)
+        # Let the app's own server-side TLS verification trust our CA — via a
+        # bundle that *also* carries the public roots, so SSL_CERT_FILE replacing
+        # the trust store doesn't break the app's outbound HTTPS. See CaBundle.
+        "SSL_CERT_FILE" => CaBundle.path
       }.compact
       # Our own bundle (rb-portless is loaded via the app's Bundler binstub) must
       # not leak into the dev command — a foreman-style `bin/dev` isn't in the
