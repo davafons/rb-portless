@@ -4,6 +4,29 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.5.1]
+
+### Security
+
+- **`--lan` exposed every running app, not just the one you shared.** LAN mode
+  is a property of the daemon — one proxy serves every project — so
+  `run --lan` in one app made every other registered route answer the whole
+  Wi-Fi too. Routes now record the opt-in (`lan: true`, set by `run --lan`) and
+  the proxy serves *only* those to off-loopback clients; everything else 404s.
+  Loopback access is unchanged. The gate fails closed: a peer address we can't
+  read counts as remote. (Upstream portless has the same daemon-wide exposure
+  and no per-route gating; this goes further deliberately.)
+- **The 404 page listed your running apps to LAN clients.** The app listing
+  added in 0.5.0 handed anyone on the network the name of every project you had
+  running. Off-loopback clients now get a bare 404.
+
+### Added
+
+- **`proxy restart --no-lan`** — return the daemon to loopback-only without a
+  `stop`/`start` dance. (`--lan`/`--no-lan` are both explicit now; a plain
+  `restart` still preserves the current mode.) The warning printed when `run
+  --lan` switches a loopback-only daemon over now says how to undo it.
+
 ## [0.5.0]
 
 ### Security
