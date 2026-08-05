@@ -4,6 +4,126 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.5.0]
+
+### Security
+
+- **The proxy listened on all interfaces.** It bound `0.0.0.0`, so every
+  registered dev app was reachable from the LAN, a VPN, or any other network
+  the machine sits on — no opt-in. The proxy (and the :80 redirect listener)
+  now binds the loopbacks only; `--lan` is the explicit opt-in, as a proxy
+  mode: `rb-portless run --lan` switches a loopback-only daemon over
+  automatically (persisted in a `proxy.lan` marker so restarts keep it), and
+  `proxy start --lan` does it by hand. Upstream portless shipped the same
+  change as a security fix.
+
+### Fixed
+
+- **HTTP/2 responses lost all headers and their body when the backend sent a
+  hop-by-hop header.** A backend `Connection: close` (or `Transfer-Encoding`,
+  `Keep-Alive`, …) was relayed verbatim into the h2 stream, where those headers
+  are illegal — the header block aborted mid-write and the client saw a bare
+  `200` with no headers and no body. The proxy now strips hop-by-hop headers
+  from backend responses (like portless), except on a 101 h1 upgrade where they
+  carry the WebSocket handshake.
+- **IPv6-first clients got `ECONNREFUSED`.** `*.localhost` resolves to `::1` as
+  well as `127.0.0.1`, but the proxy only bound IPv4 — clients without
+  Happy-Eyeballs fallback couldn't connect. The proxy now also listens on the
+  IPv6 loopback, best-effort (portless binds both).
+- **Generated Rails URLs dropped the proxy port.** `X-Forwarded-Host` was
+  stripped to the bare hostname, so whenever the proxy serves on a non-default
+  port (e.g. the `:1355` sudo-declined fallback) `request.url` and every
+  generated link pointed at the portless host *without* the port. The full
+  authority is now forwarded, as in portless.
+- **The railtie crashed apps without Action Cable.** The
+  `portless.action_cable_origins` initializer touched `config.action_cable`
+  unconditionally; API-only apps (or apps with trimmed railties) failed to boot
+  with `NoMethodError`. Now guarded.
+- **The railtie crashed apps that set `allowed_request_origins` to a bare
+  Regexp** (idiomatic — Rails' own development default is one) or a frozen
+  array: `concat` on it blew up boot. The origins list is now rebuilt with
+  `Array(existing) + ours`.
+- **A stale app-configured `:port` leaked into generated links.** With the
+  common `config.action_mailer.default_url_options = { host: "localhost",
+  port: 3000 }`, the railtie's merge kept `port: 3000` whenever the portless
+  URL had no explicit port — every mailer link pointed at
+  `https://<name>.localhost:3000`. The merge now drops `:port` unless the
+  portless URL carries one.
+- **Custom-tld subdomains beyond one label were 403'd.** Rails' leading-dot
+  host shorthand (`.myapp.test`) matches a single subdomain label, so
+  `a.b.myapp.test` failed host authorization while `a.b.myapp.localhost`
+  passed. Custom tlds now use a multi-level regexp like `.localhost` does.
+- **`--lan` devices hit Rails' blocked-host page.** The mDNS `<name>.local`
+  host was never whitelisted (it's not in any Rails default, and PORTLESS_URL
+  only carries the `.localhost` URL). `run --lan` now injects
+  `PORTLESS_LAN_HOST`, and the railtie whitelists it and adds a matching
+  Action Cable origin.
+- **`--tailscale`/`--funnel` requests were rejected by Rails.** The tunnel
+  forwards with the raw `*.ts.net` Host, which nothing whitelisted. The runner
+  now injects `PORTLESS_TAILSCALE_URL`/`PORTLESS_NGROK_URL` (parity with
+  portless), the railtie whitelists those hosts (+ Action Cable origins), and
+  the proxy also routes requests addressed to a route's share hostname
+  (upstream issue #297).
+- **`clean` left the boot service installed** — a surviving launchd/systemd
+  unit would resurrect the proxy against a deleted state dir. `clean` now
+  uninstalls it (only when one exists), and both `clean` and `prune` tear down
+  tailscale serve/funnel registrations recorded on (stale) routes.
+- **A plain `proxy restart` reverted to defaults.** The daemon now records its
+  TLS mode (like the LAN marker); `restart` preserves both unless
+  `--tls`/`--no-tls`/`--lan` are passed, and a project whose `tls` setting
+  disagrees with the running daemon gets a warning instead of silently
+  spawning a rival proxy on the default port.
+- **`clean`/re-trust cycles piled up CAs in the macOS keychain**
+  (`remove-trusted-cert` clears the trust setting but keeps the cert) — the
+  stale certificates are now deleted by CN.
+- **Monorepo runs took over other projects' routes unconditionally** —
+  `Multi` now honors `--force` like the single-app path.
+- Hostname labels (names, worktree branch prefixes) are clamped to the 63-char
+  DNS maximum — very long branch names produced invalid hostnames and
+  over-long cert filenames.
+
+### Changed
+
+- **Non-interactive privileged starts fail loudly instead of silently moving
+  to `:1355`.** When binding :443 needs sudo and there's no terminal (CI, task
+  runners), `run` used to fall back to `:1355` — quietly changing every URL.
+  It now exits with the ways out (pre-start the proxy, install the boot
+  service, or set `PORTLESS_PORT`), matching portless.
+- The proxy dials backends via `localhost` (both loopback families tried in
+  sequence), so an IPv6-only dev server (a Node app bound to `::1`) no longer
+  502s.
+- The 404 page now lists the active apps (clickable) and the `rb-portless
+  <name> <cmd>` command that would register the missing one.
+
+### Added
+
+- The `PORTLESS_*` env contract, parity with portless: `PORTLESS_HTTPS=0|1`
+  forces TLS off/on, `PORTLESS_TLD` overrides the tld, `PORTLESS_APP_PORT`
+  pins the backend port, and `PORTLESS_LAN` / `PORTLESS_NGROK` /
+  `PORTLESS_TAILSCALE` / `PORTLESS_FUNNEL` enable the matching run flags.
+  `PORTLESS_HOSTS_FILE` overrides the hosts-file path (tests, unusual
+  setups). Env overrides beat portless.json; explicit CLI flags beat both.
+- A 30s backend response-header timeout (504) so a backend that accepts and
+  then hangs can't hold client connections forever, and an (mtime, size) cache
+  for routes.json so the proxy no longer re-parses it on every request.
+- `X-Forwarded-For` on proxied requests (the client loopback/LAN address), so
+  `request.remote_ip` and request logs see the real client — parity with
+  portless.
+- `NODE_EXTRA_CA_CERTS` in the child env: Node dev servers ignore
+  `SSL_CERT_FILE`, so Node-side outbound HTTPS to portless hosts now trusts the
+  local CA too (an existing value is respected).
+- **End-to-end test suite** (`test/e2e_*_test.rb`), modeled on portless's
+  `tests/e2e`: boots the real proxy daemon on a high port plus live backends
+  and covers TLS/SNI cert verification, wildcard tenant subdomains,
+  `X-Forwarded-*`, HTTP/2, the full WebSocket relay, live route reloads,
+  404/502 pages, the daemon lifecycle (detached start → discovery → stop),
+  `run` (register → serve → deregister, process-group kill of a grandchild,
+  exit-status propagation), `PORTLESS=0` bypass, monorepo multi-app runs,
+  `prune` reaping an orphaned dev server, route-store lock contention across
+  processes — and a real Rails app booted with the railtie (host
+  authorization, `default_url_options`, mailer defaults, Action Cable
+  origins). Rails-stack gems are test-only.
+
 ## [0.4.1]
 
 ### Fixed
