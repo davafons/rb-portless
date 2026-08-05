@@ -17,7 +17,8 @@ module Portless
       if port && lan && !lan_active?
         # The proxy binds loopback-only by default; --lan needs it reachable
         # from the network, so switch the running daemon over.
-        warn "rb-portless: restarting the proxy in LAN mode (it was loopback-only)"
+        warn "rb-portless: restarting the proxy in LAN mode (it was loopback-only) — only apps run " \
+             "with --lan answer network clients; `rb-portless proxy restart --no-lan` undoes it"
         restart(tls: tls, port: port, lan: true)
         return Health.discover_port || port
       end

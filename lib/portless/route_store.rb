@@ -9,8 +9,12 @@ module Portless
   # directory mutex (atomic mkdir), and the proxy watches it. Dead-pid entries
   # are reaped on every load. Mirrors portless's RouteStore.
   class RouteStore
-    Route = Struct.new(:hostname, :port, :pid, :tailscale, :ngrok, keyword_init: true) do
+    Route = Struct.new(:hostname, :port, :pid, :tailscale, :ngrok, :lan, keyword_init: true) do
       def alias? = pid.to_i.zero? # pid 0 = static alias (never reaped)
+
+      # Did this route opt into being served to LAN clients (`run --lan`)?
+      # The proxy refuses to serve anything else off-loopback.
+      def lan? = !!lan
     end
 
     LOCK_STALE_SECONDS = 10
@@ -36,7 +40,7 @@ module Portless
       @routes_cache_key = key
       @routes_cache = load.map do |h|
         Route.new(hostname: h["hostname"], port: h["port"], pid: h["pid"],
-                  tailscale: h["tailscale"], ngrok: h["ngrok"])
+                  tailscale: h["tailscale"], ngrok: h["ngrok"], lan: h["lan"])
       end
     end
 
@@ -44,7 +48,7 @@ module Portless
     # unless force, which SIGTERMs the incumbent. Alias routes use pid 0. Public
     # share URLs (tailscale/ngrok), when present, are recorded so `list` can show
     # them while the run is active.
-    def add(hostname:, port:, pid:, force: false, tailscale: nil, ngrok: nil)
+    def add(hostname:, port:, pid:, force: false, tailscale: nil, ngrok: nil, lan: false)
       with_lock do
         all = load.reject { |r| dead?(r["pid"]) }
         existing = all.find { |r| r["hostname"] == hostname }
@@ -59,6 +63,7 @@ module Portless
         entry = { "hostname" => hostname, "port" => port, "pid" => pid }
         entry["tailscale"] = tailscale if tailscale
         entry["ngrok"] = ngrok if ngrok
+        entry["lan"] = true if lan
         all << entry
         write(all)
       end

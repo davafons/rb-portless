@@ -56,6 +56,27 @@ class SmokeTest < Minitest::Test
     assert_nil store.routes.find { |r| r.hostname == "x.localhost" }
   end
 
+  # The LAN opt-in must survive the round-trip through routes.json.
+  def test_route_store_persists_the_lan_opt_in
+    store = Portless::RouteStore.new
+    store.add(hostname: "lan-flag.localhost", port: 4124, pid: Process.pid, lan: true)
+    store.add(hostname: "no-lan.localhost", port: 4125, pid: Process.pid)
+
+    routes = Portless::RouteStore.new.routes # a fresh reader, straight from disk
+    assert routes.find { |r| r.hostname == "lan-flag.localhost" }.lan?
+    refute routes.find { |r| r.hostname == "no-lan.localhost" }.lan?
+  ensure
+    store.remove("lan-flag.localhost", owner_pid: Process.pid)
+    store.remove("no-lan.localhost", owner_pid: Process.pid)
+  end
+
+  def test_lan_flag_parsing_distinguishes_unset_from_off
+    cli = Portless::CLI.new([])
+    assert_nil cli.send(:lan_flag, %w[restart])          # unset → preserve
+    assert_equal true, cli.send(:lan_flag, %w[restart --lan])
+    assert_equal false, cli.send(:lan_flag, %w[restart --no-lan])
+  end
+
   def test_proxy_wildcard_routing
     store = Portless::RouteStore.new
     store.add(hostname: "shirabe.org.localhost", port: 4200, pid: Process.pid)

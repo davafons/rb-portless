@@ -29,7 +29,10 @@ module Portless
       warn "rb-portless: #{@config.tld_warning}" if @config.tld_warning
       ensure_trusted
       proxy_port = Daemon.ensure_running(tls: @config.tls, lan: !!@options[:lan])
-      @route_store.add(hostname: hostname, port: port, pid: Process.pid, force: @options[:force])
+      # lan: marks the route as opted into LAN serving — the proxy serves only
+      # these to off-loopback clients, so --lan shares THIS app, not every app.
+      @route_store.add(hostname: hostname, port: port, pid: Process.pid,
+                       force: @options[:force], lan: !!@options[:lan])
 
       url = display_url(hostname, proxy_port)
       rows = [ [ "Local", url, :cyan ] ]
@@ -57,7 +60,8 @@ module Portless
       return [ [ "Network", "no LAN IPv4 found", :dim ] ] unless ip
 
       @lan_host = "#{@config.name}.local"
-      @route_store.add(hostname: @lan_host, port: backend_port, pid: Process.pid, force: @options[:force])
+      @route_store.add(hostname: @lan_host, port: backend_port, pid: Process.pid,
+                       force: @options[:force], lan: true)
       @mdns_pid = Mdns.publish(@lan_host, ip)
       warn "rb-portless: trust #{State.ca_cert} on the device for HTTPS over the LAN" if @config.tls
       [ [ "Network", display_url(@lan_host, proxy_port), :green ] ]
@@ -81,7 +85,7 @@ module Portless
     def record_share_urls(hostname, port)
       return unless @ngrok || @tailscale
 
-      @route_store.add(hostname: hostname, port: port, pid: Process.pid,
+      @route_store.add(hostname: hostname, port: port, pid: Process.pid, lan: !!@options[:lan],
                        tailscale: @tailscale&.dig(:url), ngrok: @ngrok&.dig(:url))
     end
 

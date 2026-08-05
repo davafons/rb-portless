@@ -84,10 +84,19 @@ proxy (loopback-only by default, for safety) to listen on the network:
 ```bash
 rb-portless run --lan bin/dev      # also → https://<name>.local
 rb-portless run --lan --ip 10.0.0.5 bin/dev   # override the detected IP
+rb-portless proxy restart --no-lan            # stop serving the LAN
 ```
+
+**`--lan` shares that one app.** There's a single proxy for every project, so
+LAN mode opens one socket for all of them — but only routes started with
+`--lan` answer clients from the network. Everything else you have running stays
+loopback-only and 404s (without naming your other apps). The daemon stays in LAN
+mode until `proxy restart --no-lan`.
+
 > Devices won't trust your local CA without installing it — use `--lan` with
 > `--no-tls` (set `"tls": false`) for plain HTTP, or install `~/.rb-portless/ca.pem`
-> on the device.
+> on the device. mDNS publishes only `<name>.local`, so tenant subdomains
+> (`kobe.<name>.local`) won't resolve on the device.
 
 **Public sharing** (experimental) — expose the app via ngrok or your tailnet:
 

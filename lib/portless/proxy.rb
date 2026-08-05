@@ -62,10 +62,15 @@ module Portless
     # requests forwarded by the tunnel keep the *.ts.net authority, upstream
     # issue #297), then wildcard fallback so *.name.localhost all reach the
     # single app registered as name.localhost.
-    def route_for(host)
+    #
+    # `lan_client:` restricts the search to routes that opted into LAN serving
+    # (`run --lan`). LAN mode opens one socket for the whole daemon, so without
+    # this every app you happen to be running would answer the whole Wi-Fi.
+    def route_for(host, lan_client: false)
       authority = host.to_s.downcase.delete_suffix(":443")
       host = authority.split(":").first.to_s
       routes = @route_store.routes
+      routes = routes.select(&:lan?) if lan_client
       routes.find { |r| r.hostname == host } ||
         routes.find { |r| share_match?(r, authority, host) } ||
         routes.find { |r| host.end_with?(".#{r.hostname}") }
@@ -76,8 +81,12 @@ module Portless
     # (Async::HTTP::Server.for(endpoint, &proxy.method(:call))).
     def call(request)
       host = request_host(request)
-      route = route_for(host)
-      return not_found(host) unless route
+      # Only consulted in LAN mode: with a loopback-only bind there is no
+      # off-machine client, and a stricter default there could 404 local dev if
+      # the peer address were ever unreadable.
+      lan_client = @lan && !loopback_client?(request)
+      route = route_for(host, lan_client: lan_client)
+      return not_found(host, lan_client: lan_client) unless route
 
       hops = request.headers[HOP_HEADER].to_a.first.to_i
       return error(508, "Proxy loop detected for #{host}.") if hops >= Constants::MAX_PROXY_HOPS
@@ -187,6 +196,20 @@ module Portless
       "127.0.0.1"
     end
 
+    # Is the peer on this machine? Positive identification only — an unreadable
+    # address counts as remote, so LAN gating fails closed.
+    def loopback_client?(request)
+      address = begin
+        request.remote_address&.ip_address
+      rescue StandardError
+        nil
+      end
+      return false unless address
+
+      address = address.to_s.downcase.delete_prefix("::ffff:")
+      address == "::1" || address.start_with?("127.")
+    end
+
     def strip_hop_headers(response)
       HOP_BY_HOP.each { |key| response.headers.delete(key) }
     end
@@ -246,7 +269,11 @@ module Portless
 
     # The 404 lists what IS running (clickable) plus the command that would
     # register the missing name — upstream portless's most-loved error page.
-    def not_found(host)
+    # Never to a LAN client though: that would hand anyone on the Wi-Fi the
+    # name of every project you have running.
+    def not_found(host, lan_client: false)
+      return error(404, "No app is registered for <strong>#{escape(host)}</strong>.") if lan_client
+
       safe_host = escape(host)
       routes = @route_store.routes
       suffix = @port == (@tls ? Constants::HTTPS_PORT : Constants::HTTP_PORT) ? "" : ":#{@port}"

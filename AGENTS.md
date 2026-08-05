@@ -27,6 +27,13 @@ injected as `PORT`; the proxy routes the named host to it.
 - **Per-host SNI certs.** `*.localhost` wildcard certs are invalid at the
   reserved-TLD boundary, so mint a leaf per hostname on the TLS SNI callback,
   cached on disk + in memory.
+- **Loopback by default; LAN is opt-in twice.** The proxy binds `127.0.0.1` +
+  `::1` unless started `--lan` (persisted in `proxy.lan`). Even then only
+  routes carrying `lan: true` (registered by `run --lan`) are served to
+  off-loopback clients — one daemon serves every project, so without that
+  gate one app's `--lan` would expose all of them. Gating fails closed: an
+  unreadable peer address counts as remote. The 404 page's app listing is
+  suppressed for LAN clients (it would enumerate your projects).
 
 ## Module map (`lib/portless/`)
 

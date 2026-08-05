@@ -31,6 +31,41 @@ class ProxyTest < Minitest::Test
     @store.remove("demo.localhost", owner_pid: Process.pid)
   end
 
+  # LAN mode opens ONE socket for the whole daemon, so a client off the
+  # loopback must only ever reach apps that opted in with `run --lan`.
+  def test_lan_clients_only_reach_routes_that_opted_in
+    @store.add(hostname: "shared.localhost", port: 4321, pid: Process.pid, lan: true)
+    @store.add(hostname: "private.localhost", port: 4322, pid: Process.pid)
+
+    # Loopback client: everything, as always.
+    assert_equal 4321, @proxy.route_for("shared.localhost").port
+    assert_equal 4322, @proxy.route_for("private.localhost").port
+
+    # LAN client: only the shared app — including via its wildcard subdomains.
+    assert_equal 4321, @proxy.route_for("shared.localhost", lan_client: true).port
+    assert_equal 4321, @proxy.route_for("kobe.shared.localhost", lan_client: true).port
+    assert_nil @proxy.route_for("private.localhost", lan_client: true)
+    assert_nil @proxy.route_for("kobe.private.localhost", lan_client: true)
+  ensure
+    @store.remove("shared.localhost", owner_pid: Process.pid)
+    @store.remove("private.localhost", owner_pid: Process.pid)
+  end
+
+  # The friendly 404 lists every running app — fine locally, an inventory of
+  # your projects if handed to whoever else is on the Wi-Fi.
+  def test_the_404_does_not_leak_the_app_list_to_lan_clients
+    @store.add(hostname: "private.localhost", port: 4322, pid: Process.pid)
+
+    local = @proxy.send(:not_found, "nope.localhost")
+    assert_includes body_of(local), "private.localhost"
+
+    lan = @proxy.send(:not_found, "nope.localhost", lan_client: true)
+    refute_includes body_of(lan), "private.localhost"
+    assert_equal 404, lan.status
+  ensure
+    @store.remove("private.localhost", owner_pid: Process.pid)
+  end
+
   # Tunnel-forwarded requests keep the public authority (upstream issue #297):
   # a route's tailscale/ngrok URL must resolve to its backend too.
   def test_share_hostnames_route_to_the_backend
@@ -125,6 +160,14 @@ class ProxyTest < Minitest::Test
   end
 
   def health(response) = response.headers[Portless::Constants::HEALTH_HEADER].to_a.first
+
+  def body_of(response)
+    buffer = +""
+    while (chunk = response.body.read)
+      buffer << chunk
+    end
+    buffer
+  end
 
   def closed_port
     server = TCPServer.new("127.0.0.1", 0)

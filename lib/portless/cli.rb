@@ -105,10 +105,10 @@ module Portless
       case args.first
       when "start"
         Daemon.start(tls: tls_flag(args), port: int_flag(args, "--port"),
-                     foreground: flag?("--foreground"), lan: args.include?("--lan"))
+                     foreground: flag?("--foreground"), lan: lan_flag(args) || false)
       when "stop"    then Daemon.stop
       when "restart" then Daemon.restart(tls: explicit_tls_flag(args), port: int_flag(args, "--port"),
-                                         lan: args.include?("--lan") || nil)
+                                         lan: lan_flag(args))
       when nil       then command_help("proxy")
       else invalid_action!("proxy start|stop|restart")
       end
@@ -280,6 +280,14 @@ module Portless
       nil
     end
 
+    # nil unless the user passed --lan/--no-lan (restart preserves the mode).
+    def lan_flag(args)
+      return false if args.include?("--no-lan")
+      return true if args.include?("--lan")
+
+      nil
+    end
+
     def int_flag(args, name)
       i = args.index(name)
       i ? Integer(args[i + 1], exception: false) : nil
@@ -358,8 +366,10 @@ module Portless
                      example: "rb-portless alias postgres 5432   # -> https://postgres.localhost" },
       "proxy"   => { summary: "Manage the proxy daemon.",
                      usage: [ "proxy start [--no-tls] [--port <n>] [--lan]", "proxy stop",
-                              "proxy restart   (pick up an updated rb-portless)" ],
-                     flags: [ [ "--lan", "listen on all interfaces (default: loopback only)" ] ] },
+                              "proxy restart [--lan | --no-lan]   (also picks up an updated gem)" ],
+                     flags: [ [ "--lan", "listen on all interfaces (default: loopback only)" ],
+                              [ "--no-lan", "go back to loopback-only" ] ],
+                     example: "rb-portless proxy restart --no-lan   # stop serving the LAN" },
       "trust"   => { summary: "Trust the local CA so HTTPS works without warnings.",
                      usage: [ "trust" ] },
       "hosts"   => { summary: "Manage the /etc/hosts block (Safari / non-.localhost TLDs).",
