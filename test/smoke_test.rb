@@ -26,6 +26,14 @@ class SmokeTest < Minitest::Test
     assert_equal "shirabe.org.localhost", config.hostname
   end
 
+  def test_labels_are_clamped_to_the_dns_maximum
+    config = Portless::Config.new({ "name" => "x" * 80 }, Dir.pwd)
+    assert_equal 63, config.name.length
+
+    prefix = Portless::Worktree.branch_to_prefix("feature/#{'y' * 80}")
+    assert_equal 63, prefix.length
+  end
+
   def test_config_parses_apps_map
     config = Portless::Config.new({ "apps" => { "web" => "bin/rails server", "api" => "node a.js" } }, Dir.pwd)
     assert_equal({ "web" => "bin/rails server", "api" => "node a.js" }, config.apps)

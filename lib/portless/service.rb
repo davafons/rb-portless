@@ -28,6 +28,12 @@ module Portless
       puts "rb-portless: boot service removed"
     end
 
+    # Is a boot service on disk? (Both locations are world-readable, so this
+    # never needs sudo — `clean` uses it to skip a pointless elevation.)
+    def installed?
+      Constants::MACOS ? File.exist?(launchd_plist_path) : File.exist?(systemd_unit_path)
+    end
+
     def status
       if Constants::MACOS
         system("launchctl", "print", "system/#{LABEL}", out: $stdout, err: $stdout) ||

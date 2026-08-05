@@ -20,9 +20,10 @@ module Portless
     HOP_BY_HOP = %w[connection keep-alive proxy-authenticate proxy-authorization
                     te trailers transfer-encoding upgrade host].freeze
 
-    def initialize(port:, tls: true, route_store: RouteStore.new, certs: Certs.new)
+    def initialize(port:, tls: true, lan: false, route_store: RouteStore.new, certs: Certs.new)
       @port = port
       @tls = tls
+      @lan = lan
       @route_store = route_store
       @certs = certs
       @clients = {}
@@ -41,19 +42,32 @@ module Portless
       install_signal_handlers
 
       Async do
-        make_server(listen_endpoint).run
+        listen_hosts.each { |host| make_server(endpoint_for(host)).run }
         start_redirect_listener if @tls && @port != Constants::HTTP_PORT
       end
     ensure
       cleanup
     end
 
-    # Exact host match, then wildcard fallback so *.name.localhost all reach the
+    # Loopback-only unless LAN mode was asked for: on 0.0.0.0 every registered
+    # dev app is reachable from the LAN/VPN by default (upstream shipped the
+    # same change as a security fix). `*.localhost` resolves to ::1 too, so an
+    # IPv6-loopback sibling always listens (best-effort — its bind failure
+    # surfaces as a logged task error, never fatal).
+    def listen_hosts
+      (@lan ? [ "0.0.0.0" ] : [ "127.0.0.1" ]) + [ "[::1]" ]
+    end
+
+    # Exact host match, then a route's public share hostname (tailscale/ngrok —
+    # requests forwarded by the tunnel keep the *.ts.net authority, upstream
+    # issue #297), then wildcard fallback so *.name.localhost all reach the
     # single app registered as name.localhost.
     def route_for(host)
-      host = host.to_s.split(":").first.to_s.downcase
+      authority = host.to_s.downcase.delete_suffix(":443")
+      host = authority.split(":").first.to_s
       routes = @route_store.routes
       routes.find { |r| r.hostname == host } ||
+        routes.find { |r| share_match?(r, authority, host) } ||
         routes.find { |r| host.end_with?(".#{r.hostname}") }
     end
 
@@ -63,22 +77,63 @@ module Portless
     def call(request)
       host = request_host(request)
       route = route_for(host)
-      return error(404, "No app is registered for #{host}.") unless route
+      return not_found(host) unless route
 
       hops = request.headers[HOP_HEADER].to_a.first.to_i
       return error(508, "Proxy loop detected for #{host}.") if hops >= Constants::MAX_PROXY_HOPS
 
-      response = client_for(route.port).call(build_forward(request, host, hops))
-      # The h1 backend accepts a WebSocket with 101 Switching Protocols, but
-      # HTTP/2 forbids 1xx finals — an extended-CONNECT success is a plain 2xx.
-      response.status = 200 if response.status == 101 && request.version == "HTTP/2"
+      response = with_backend_timeout do
+        client_for(route.port).call(build_forward(request, host, hops))
+      end
+      if response.status == 101 && request.version == "HTTP/2"
+        # The h1 backend accepts a WebSocket with 101 Switching Protocols, but
+        # HTTP/2 forbids 1xx finals — an extended-CONNECT success is a plain 2xx,
+        # and the h1 handshake headers are meaningless (and illegal) on h2.
+        response.status = 200
+        strip_hop_headers(response)
+        response.headers.delete("sec-websocket-accept")
+      elsif response.status != 101
+        # Hop-by-hop headers are single-hop by definition; relayed into an h2
+        # stream a backend's `Connection: close` aborts the whole header block,
+        # so the client sees a bare 200 with no headers and no body.
+        strip_hop_headers(response)
+      end
       response.headers.add(Constants::HEALTH_HEADER, VERSION)
       response
+    rescue Async::TimeoutError
+      error(504, "Backend for #{host} accepted the connection but never answered.")
     rescue StandardError => e
       error(502, "Backend for #{host} is not responding (#{e.class}).")
     end
 
     private
+
+    # Does the request authority match this route's public tunnel URL
+    # (https://<device>.ts.net[:port] / https://xxxx.ngrok.app)?
+    def share_match?(route, authority, host)
+      [ route.tailscale, route.ngrok ].compact.any? do |url|
+        uri = begin
+          URI(url)
+        rescue StandardError
+          nil
+        end
+        next false unless uri&.host
+
+        share = uri.port && uri.port != 443 ? "#{uri.host}:#{uri.port}" : uri.host
+        authority == share.downcase || host == uri.host.downcase
+      end
+    end
+
+    # Bound the wait for the backend's response *headers* (body streaming is
+    # unaffected) — a backend that accepts and then hangs must not hold client
+    # connections forever. No-op outside a reactor (unit tests drive #call
+    # directly).
+    BACKEND_HEADER_TIMEOUT = 30
+
+    def with_backend_timeout(&block)
+      task = Async::Task.current?
+      task ? task.with_timeout(BACKEND_HEADER_TIMEOUT, &block) : yield
+    end
 
     def make_server(endpoint)
       Async::HTTP::Server.for(endpoint) { |request| call(request) }
@@ -97,9 +152,15 @@ module Portless
         key.downcase == "cookie" ? cookies << value : headers.add(key, value)
       end
       headers.add("cookie", cookies.join("; ")) unless cookies.empty?
-      headers.set("x-forwarded-host", host.split(":").first)
+      # Keep the full authority (host:port): Rails rebuilds request.url from
+      # X-Forwarded-Host, so stripping the port breaks generated URLs whenever
+      # the proxy serves on a non-default port (e.g. the :1355 fallback).
+      headers.set("x-forwarded-host", host)
       headers.set("x-forwarded-proto", @tls ? "https" : "http")
       headers.set("x-forwarded-port", @port.to_s)
+      # Append (repeated XFF fields join as a comma list) so Rails' remote_ip
+      # sees the real client — 127.0.0.1 locally, the device IP in LAN mode.
+      headers.add("x-forwarded-for", client_address(request))
       headers.add(HOP_HEADER, (hops + 1).to_s)
 
       # HTTP/2 WebSockets arrive as extended CONNECT (RFC 8441, :protocol on the
@@ -120,14 +181,27 @@ module Portless
       )
     end
 
-    def client_for(port)
-      @clients[port] ||= Async::HTTP::Client.new(Async::HTTP::Endpoint.parse("http://127.0.0.1:#{port}"))
+    def client_address(request)
+      request.remote_address&.ip_address || "127.0.0.1"
+    rescue StandardError
+      "127.0.0.1"
     end
 
-    def listen_endpoint
+    def strip_hop_headers(response)
+      HOP_BY_HOP.each { |key| response.headers.delete(key) }
+    end
+
+    def client_for(port)
+      # "localhost", not 127.0.0.1: the endpoint tries each resolved address in
+      # sequence, so an IPv6-only backend (a Node server bound to ::1) still
+      # connects — portless happy-eyeballs both loopbacks the same way.
+      @clients[port] ||= Async::HTTP::Client.new(Async::HTTP::Endpoint.parse("http://localhost:#{port}"))
+    end
+
+    def endpoint_for(host)
       scheme = @tls ? "https" : "http"
       options = @tls ? { ssl_context: ssl_context } : {}
-      Async::HTTP::Endpoint.parse("#{scheme}://0.0.0.0:#{@port}", **options)
+      Async::HTTP::Endpoint.parse("#{scheme}://#{host}:#{@port}", **options)
     end
 
     # Base TLS context with an SNI callback that swaps in a per-host leaf cert.
@@ -152,13 +226,16 @@ module Portless
       end
     end
 
-    # A best-effort :80 listener that bounces plain HTTP to HTTPS.
+    # A best-effort :80 listener that bounces plain HTTP to HTTPS. Same bind
+    # scope as the main listeners (loopback unless LAN).
     def start_redirect_listener
-      endpoint = Async::HTTP::Endpoint.parse("http://0.0.0.0:#{Constants::HTTP_PORT}")
-      Async::HTTP::Server.for(endpoint) do |request|
-        host = request_host(request).split(":").first
-        Protocol::HTTP::Response[302, { "location" => "https://#{host}#{request.path}", Constants::HEALTH_HEADER => VERSION }, []]
-      end.run
+      listen_hosts.each do |host|
+        endpoint = Async::HTTP::Endpoint.parse("http://#{host}:#{Constants::HTTP_PORT}")
+        Async::HTTP::Server.for(endpoint) do |request|
+          request_host = request_host(request).split(":").first
+          Protocol::HTTP::Response[302, { "location" => "https://#{request_host}#{request.path}", Constants::HEALTH_HEADER => VERSION }, []]
+        end.run
+      end
     rescue StandardError
       nil # port 80 taken / unavailable — non-fatal.
     end
@@ -167,16 +244,53 @@ module Portless
       (request.authority || request.headers["host"].to_a.first).to_s
     end
 
-    def error(status, message)
+    # The 404 lists what IS running (clickable) plus the command that would
+    # register the missing name — upstream portless's most-loved error page.
+    def not_found(host)
+      safe_host = escape(host)
+      routes = @route_store.routes
+      suffix = @port == (@tls ? Constants::HTTPS_PORT : Constants::HTTP_PORT) ? "" : ":#{@port}"
+      scheme = @tls ? "https" : "http"
+      apps = if routes.empty?
+        "<p style='color:#888'>No apps are running.</p>"
+      else
+        items = routes.map do |r|
+          url = "#{scheme}://#{escape(r.hostname)}#{suffix}"
+          "<li><a href='#{url}'>#{escape(r.hostname)}</a> <span style='color:#888'>→ :#{r.port.to_i}</span></li>"
+        end
+        "<p>Active apps:</p><ul>#{items.join}</ul>"
+      end
+      name = host.to_s.split(":").first.to_s.split(".").first
+      name = "myapp" if name.empty?
+      hint = "<pre style='background:rgba(128,128,128,.15);padding:.75rem;border-radius:6px'>" \
+             "rb-portless #{escape(name)} bin/dev</pre>"
+      error(404, "No app is registered for <strong>#{safe_host}</strong>.", extra: "#{apps}#{hint}")
+    end
+
+    def error(status, message, extra: "")
       body = Protocol::HTTP::Body::Buffered.wrap("<!doctype html><meta charset=utf-8><title>rb-portless</title>" \
+        "<meta name=color-scheme content='light dark'>" \
         "<body style='font:16px system-ui;padding:3rem;max-width:40rem;margin:auto'>" \
-        "<h1>#{status}</h1><p>#{message}</p></body>")
+        "<h1>#{status}</h1><p>#{message}</p>#{extra}" \
+        "<p style='color:#888;margin-top:2rem'>rb-portless</p></body>")
       Protocol::HTTP::Response[status, { "content-type" => "text/html; charset=utf-8", Constants::HEALTH_HEADER => VERSION }, body]
+    end
+
+    def escape(value)
+      value.to_s.gsub("&", "&amp;").gsub("<", "&lt;").gsub(">", "&gt;").gsub('"', "&quot;").gsub("'", "&#39;")
     end
 
     def write_markers
       File.write(State.proxy_pid_file, Process.pid.to_s)
       File.write(State.proxy_port_file, @port.to_s)
+      # Record how this daemon was started so restarts (and `run`'s
+      # mode-mismatch detection) can preserve/compare it.
+      File.write(State.proxy_tls_file, @tls ? "1" : "0")
+      if @lan
+        File.write(State.proxy_lan_file, "1")
+      elsif File.exist?(State.proxy_lan_file)
+        File.delete(State.proxy_lan_file)
+      end
       State.fix_ownership
     end
 
@@ -189,7 +303,10 @@ module Portless
     def cleanup
       return unless marker_pid == Process.pid
 
-      [ State.proxy_pid_file, State.proxy_port_file ].each { |f| File.delete(f) if File.exist?(f) }
+      [ State.proxy_pid_file, State.proxy_port_file,
+        State.proxy_lan_file, State.proxy_tls_file ].each do |f|
+        File.delete(f) if File.exist?(f)
+      end
     rescue StandardError
       nil
     end

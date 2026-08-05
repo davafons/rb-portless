@@ -26,6 +26,8 @@ module Portless
     def routes_lock = path("routes.lock")
     def proxy_pid_file = path("proxy.pid")
     def proxy_port_file = path("proxy.port")
+    def proxy_lan_file = path("proxy.lan")
+    def proxy_tls_file = path("proxy.tls")
     def proxy_log = path("proxy.log")
     def ca_cert = path("ca.pem")
     def ca_key = path("ca-key.pem")

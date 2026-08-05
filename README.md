@@ -78,7 +78,8 @@ starts them all, each at its own name:
 ```
 
 **LAN mode** — reach the app from your phone on the same Wi-Fi. It detects the
-LAN IP, registers `<name>.local`, and publishes it over mDNS:
+LAN IP, registers `<name>.local`, publishes it over mDNS, and switches the
+proxy (loopback-only by default, for safety) to listen on the network:
 
 ```bash
 rb-portless run --lan bin/dev      # also → https://<name>.local
@@ -141,6 +142,11 @@ In a **git worktree** linked off a non-default branch, the branch name is prepen
 as a subdomain — `feature/auth` → `https://auth.<name>.localhost` — so every worktree
 gets a distinct URL. Pass `--no-worktree` (on `get`) to skip it. Set **`PORTLESS=0`**
 (`false`/`skip`) to run the command directly without the proxy.
+
+Every run flag has an env equivalent for scripts/CI: `PORTLESS_LAN`,
+`PORTLESS_NGROK`, `PORTLESS_TAILSCALE`, `PORTLESS_FUNNEL` (set to `1`),
+`PORTLESS_APP_PORT`, plus `PORTLESS_HTTPS=0|1` and `PORTLESS_TLD` overriding
+`portless.json`, and `PORTLESS_PORT` for the proxy port. Explicit flags win.
 
 ## Rails
 

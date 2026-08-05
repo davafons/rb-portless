@@ -43,10 +43,13 @@ module Portless
       # The router's defaults cover jobs and any request-less url_for (mailers
       # merge them in too). Set the mailer's own default_url_options via on_load
       # so we win over Rails' earlier action_mailer.set_configs regardless of
-      # railtie order.
-      app.routes.default_url_options.merge!(options)
+      # railtie order. merge_url_options drops a stale app-configured :port
+      # (e.g. `port: 3000`) that would otherwise survive into every link.
+      app.routes.default_url_options.replace(
+        RailsHosts.merge_url_options(app.routes.default_url_options, options)
+      )
       ActiveSupport.on_load(:action_mailer) do
-        self.default_url_options = default_url_options.merge(options)
+        self.default_url_options = RailsHosts.merge_url_options(default_url_options, options)
       end
     end
 
@@ -55,12 +58,17 @@ module Portless
     # localhost is rejected and Cable silently never connects.
     initializer "portless.action_cable_origins" do |app|
       next unless defined?(Rails) && Rails.env.development?
+      # Apps without Action Cable (API-only, trimmed railties) have no
+      # config.action_cable — touching it would crash boot.
+      next unless app.config.respond_to?(:action_cable)
 
       origins = RailsHosts.cable_origins
       next if origins.empty?
 
-      app.config.action_cable.allowed_request_origins ||= []
-      app.config.action_cable.allowed_request_origins.concat(origins)
+      # Array(): apps idiomatically set a bare Regexp (Rails' own dev default
+      # is one) — concat on it would crash boot; a frozen array would too.
+      app.config.action_cable.allowed_request_origins =
+        Array(app.config.action_cable.allowed_request_origins) + origins
     end
   end
 end

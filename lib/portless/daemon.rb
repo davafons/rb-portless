@@ -10,12 +10,39 @@ module Portless
   module Daemon
     module_function
 
-    def ensure_running(tls:)
+    def ensure_running(tls:, lan: false)
       port = Health.discover_port
+      port = nil if tls && port == Constants::HTTP_PORT
+
+      if port && lan && !lan_active?
+        # The proxy binds loopback-only by default; --lan needs it reachable
+        # from the network, so switch the running daemon over.
+        warn "rb-portless: restarting the proxy in LAN mode (it was loopback-only)"
+        restart(tls: tls, port: port, lan: true)
+        return Health.discover_port || port
+      end
+      if port && !recorded_tls.nil? && recorded_tls != tls
+        # Another project started the daemon in the other TLS mode; don't fight
+        # over it — that used to spawn a rival proxy on the default port.
+        warn "rb-portless: the proxy is serving #{recorded_tls ? 'HTTPS' : 'HTTP'} but this project " \
+             "sets tls: #{tls} — keeping the running proxy " \
+             "(`rb-portless proxy restart #{tls ? '--tls' : '--no-tls'}` to switch)"
+      end
       return refresh_stale(port, tls: tls) if port
 
-      start(tls: tls)
+      start(tls: tls, lan: lan)
       Health.discover_port
+    end
+
+    # Was the running proxy started in LAN mode? (Marker written by the daemon.)
+    def lan_active? = File.exist?(State.proxy_lan_file)
+
+    # The TLS mode the running daemon recorded, or nil (no marker / old daemon).
+    def recorded_tls
+      value = File.read(State.proxy_tls_file).strip
+      value != "0"
+    rescue StandardError
+      nil
     end
 
     # The daemon outlives gem updates — after a `bundle update` the process on
@@ -59,25 +86,29 @@ module Portless
       !$stdin.gets.to_s.strip.downcase.start_with?("n")
     end
 
-    def restart(tls:, port: nil)
-      port ||= Health.discover_port
+    def restart(tls: nil, port: nil, lan: nil)
+      # A plain restart keeps the daemon's recorded modes; explicit flags win.
+      tls = recorded_tls if tls.nil?
+      tls = true if tls.nil?
+      lan = lan_active? if lan.nil?
+      port ||= Integer(ENV["PORTLESS_PORT"], exception: false) || default_port(tls)
       stop
       wait_until_stopped(port) if port
-      start(tls: tls, port: port)
+      start(tls: tls, port: port, lan: lan)
     end
 
     # foreground: become the daemon (binds the port, blocks). Otherwise
     # orchestrate: elevate if needed, then spawn the detached foreground daemon.
-    def start(tls:, port: nil, foreground: false)
+    def start(tls:, port: nil, foreground: false, lan: false)
       port ||= Integer(ENV["PORTLESS_PORT"], exception: false) || default_port(tls)
 
-      return Proxy.new(port: port, tls: tls).run if foreground
+      return Proxy.new(port: port, tls: tls, lan: lan).run if foreground
       return if Health.proxy_running?(port)
 
       if Privilege.needs_sudo?(port) && !Privilege.root?
-        start_privileged(port: port, tls: tls)
+        start_privileged(port: port, tls: tls, lan: lan)
       else
-        spawn_detached(port: port, tls: tls)
+        spawn_detached(port: port, tls: tls, lan: lan)
       end
     end
 
@@ -108,26 +139,33 @@ module Portless
       PortOwner.listeners(port).find { |pid| pid != Process.pid }
     end
 
-    def start_privileged(port:, tls:)
+    def start_privileged(port:, tls:, lan: false)
       unless Privilege.interactive?
-        warn "rb-portless: can't bind :#{port} without a terminal — using :#{Constants::FALLBACK_PROXY_PORT}"
-        return spawn_detached(port: Constants::FALLBACK_PROXY_PORT, tls: tls)
+        # Don't silently fall back to :1355 here — that changes every URL
+        # (OAuth redirect URIs, bookmarks) with nobody watching. Fail with the
+        # ways out instead, like portless does in CI.
+        raise NonInteractiveError,
+              "binding :#{port} needs sudo and there's no terminal to ask — pre-start the proxy " \
+              "(`rb-portless proxy start`), install the boot service (`rb-portless service install`), " \
+              "or set PORTLESS_PORT to an unprivileged port"
       end
 
       warn "rb-portless: binding :#{port} needs sudo (it's a privileged port) — " \
            "enter your password to serve #{tls ? 'HTTPS' : 'HTTP'} without a port number"
-      ok = Privilege.reexec_with_sudo([ "proxy", "start", "--port", port.to_s, tls ? "--tls" : "--no-tls" ])
+      ok = Privilege.reexec_with_sudo([ "proxy", "start", "--port", port.to_s,
+                                        tls ? "--tls" : "--no-tls", *(lan ? [ "--lan" ] : []) ])
       return wait_until_running(port) if ok
 
       warn "rb-portless: sudo declined — using :#{Constants::FALLBACK_PROXY_PORT}"
-      spawn_detached(port: Constants::FALLBACK_PROXY_PORT, tls: tls)
+      spawn_detached(port: Constants::FALLBACK_PROXY_PORT, tls: tls, lan: lan)
     end
 
-    def spawn_detached(port:, tls:)
+    def spawn_detached(port:, tls:, lan: false)
       State.ensure_dir!
       log = File.open(State.proxy_log, "a")
       args = [ RbConfig.ruby, "-I", lib_dir, Privilege.program,
-               "proxy", "start", "--foreground", "--port", port.to_s, tls ? "--tls" : "--no-tls" ]
+               "proxy", "start", "--foreground", "--port", port.to_s,
+               tls ? "--tls" : "--no-tls", *(lan ? [ "--lan" ] : []) ]
       pid = Process.spawn(*args, out: log, err: log, pgroup: true)
       Process.detach(pid)
       log.close

@@ -8,6 +8,22 @@ class HealthTest < Minitest::Test
     refute Portless::Health.proxy_running?(free_port, timeout: 0.3)
   end
 
+  def test_proxy_not_running_when_tls_handshake_stalls
+    server = TCPServer.new("127.0.0.1", 0)
+    thread = Thread.new do
+      client = server.accept
+      sleep 2
+      client.close
+    rescue IOError
+      nil
+    end
+
+    refute Portless::Health.proxy_running?(server.addr[1], timeout: 0.1)
+  ensure
+    server&.close
+    thread&.kill
+  end
+
   def test_discover_port_returns_a_port_or_nil
     # No live proxy in tests → nil (or a probed port if one happens to answer).
     result = Portless::Health.discover_port

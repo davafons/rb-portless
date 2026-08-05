@@ -21,8 +21,20 @@ module Portless
       @lock = lock
     end
 
+    # The proxy calls this on every request; re-parsing routes.json each time is
+    # a syscall + JSON parse on the hot path. Cache on (mtime, size) — any write
+    # through with_lock touches both, so live reload still works.
     def routes
-      load.map do |h|
+      stat = begin
+        File.stat(@file)
+      rescue StandardError
+        nil
+      end
+      key = stat && [ stat.mtime, stat.size ]
+      return @routes_cache if key && key == @routes_cache_key
+
+      @routes_cache_key = key
+      @routes_cache = load.map do |h|
         Route.new(hostname: h["hostname"], port: h["port"], pid: h["pid"],
                   tailscale: h["tailscale"], ngrok: h["ngrok"])
       end

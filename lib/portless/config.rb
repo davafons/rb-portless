@@ -16,9 +16,15 @@ module Portless
     def initialize(data, dir = Dir.pwd)
       @dir = dir
       @name = sanitize_label(data["name"] || infer_name(dir))
-      @tld = (data["tld"] || Constants::DEFAULT_TLD).to_s
+      # Env overrides beat portless.json (the portless env-var contract):
+      # PORTLESS_TLD replaces the tld, PORTLESS_HTTPS=0/1 forces TLS off/on.
+      @tld = (ENV["PORTLESS_TLD"] || data["tld"] || Constants::DEFAULT_TLD).to_s
       @app_port = data["appPort"] || data["app_port"]
       @tls = data.fetch("tls", true)
+      case ENV["PORTLESS_HTTPS"].to_s.downcase
+      when "0", "false" then @tls = false
+      when "1", "true" then @tls = true
+      end
       # Monorepo: { "apps": { "web": "bin/rails server", "api": "node api.js" } }.
       @apps = (data["apps"] || {}).transform_keys { |k| sanitize_label(k) }
     end
@@ -78,9 +84,11 @@ module Portless
       nil
     end
 
-    # A valid DNS label: lowercase alnum + hyphens, trimmed.
+    # A valid DNS label: lowercase alnum + hyphens, trimmed, clamped to the
+    # 63-char DNS maximum (long names would invalidate hostname + cert CN).
     def sanitize_label(value)
       label = value.to_s.downcase.gsub(/[^a-z0-9-]+/, "-").gsub(/\A-+|-+\z/, "")
+      label = label[0, 63].to_s.gsub(/-+\z/, "")
       label.empty? ? "app" : label
     end
   end

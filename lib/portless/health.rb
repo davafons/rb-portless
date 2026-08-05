@@ -46,7 +46,7 @@ module Portless
       ctx.verify_mode = OpenSSL::SSL::VERIFY_NONE
       ssl = OpenSSL::SSL::SSLSocket.new(socket, ctx)
       ssl.sync_close = true
-      ssl.connect
+      Timeout.timeout(timeout) { ssl.connect }
       ssl.write(REQUEST)
       # Read timeout too — a port that accepts but never answers must not hang us.
       Timeout.timeout(timeout) { ssl.read(4096) }

@@ -40,6 +40,13 @@ module Portless
       uninstall_nss
       if Constants::MACOS
         system("security", "remove-trusted-cert", State.ca_cert)
+        # remove-trusted-cert clears the trust setting but leaves the cert in
+        # the keychain — repeated clean/reinstall cycles pile up CAs. Delete by
+        # CN (bounded loop: one entry per pass, tolerate several stale ones).
+        10.times do
+          break unless system("security", "delete-certificate", "-c", Certs::CA_SUBJECT.delete_prefix("/CN="),
+                              out: File::NULL, err: File::NULL)
+        end
       elsif linux?
         uninstall_linux
       end

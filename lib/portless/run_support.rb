@@ -12,10 +12,23 @@ module Portless
         "PORT" => port.to_s,
         "HOST" => "127.0.0.1",
         "PORTLESS_URL" => url,
+        # Under --lan, let the app (the Rails railtie) whitelist <name>.local
+        # too — it's not covered by any host-authorization default.
+        "PORTLESS_LAN_HOST" => @lan_host,
+        # Public tunnel URLs (when sharing): tailscale forwards with the raw
+        # *.ts.net Host, so the app must whitelist it — and apps can
+        # self-reference their public address (mirrors portless).
+        "PORTLESS_TAILSCALE_URL" => @tailscale&.dig(:url),
+        "PORTLESS_NGROK_URL" => @ngrok&.dig(:url),
         # Let the app's own server-side TLS verification trust our CA — via a
         # bundle that *also* carries the public roots, so SSL_CERT_FILE replacing
         # the trust store doesn't break the app's outbound HTTPS. See CaBundle.
-        "SSL_CERT_FILE" => CaBundle.path
+        "SSL_CERT_FILE" => CaBundle.path,
+        # Node ignores SSL_CERT_FILE; NODE_EXTRA_CA_CERTS *adds* to its default
+        # roots, so the bare CA is enough (mirrors portless). Respect an
+        # existing value — additions can only live in one file.
+        "NODE_EXTRA_CA_CERTS" => ENV["NODE_EXTRA_CA_CERTS"] ||
+          (State.ca_cert if File.exist?(State.ca_cert))
       }.compact
       # Our own bundle (rb-portless is loaded via the app's Bundler binstub) must
       # not leak into the dev command — a foreman-style `bin/dev` isn't in the

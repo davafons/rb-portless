@@ -10,7 +10,11 @@ module Portless
   module Hosts
     module_function
 
+    # PORTLESS_HOSTS_FILE overrides the target (tests; unusual setups).
     def file
+      override = ENV["PORTLESS_HOSTS_FILE"]
+      return override unless override.to_s.empty?
+
       Constants::WINDOWS ? File.join(ENV.fetch("SystemRoot", "C:/Windows"), "System32/drivers/etc/hosts") : "/etc/hosts"
     end
 

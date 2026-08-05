@@ -58,12 +58,14 @@ module Portless
       end
     end
 
-    # Last `/`-segment of the branch, sanitized; nil for default/detached HEAD.
+    # Last `/`-segment of the branch, sanitized and clamped to the 63-char DNS
+    # label maximum; nil for default/detached HEAD.
     def branch_to_prefix(branch)
       return nil if branch.nil? || branch.empty? || branch == "HEAD"
       return nil if DEFAULT_BRANCHES.include?(branch)
 
       label = branch.split("/").last.to_s.downcase.gsub(/[^a-z0-9-]+/, "-").gsub(/\A-+|-+\z/, "")
+      label = label[0, 63].to_s.gsub(/-+\z/, "")
       label.empty? ? nil : label
     end
 

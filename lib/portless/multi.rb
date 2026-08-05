@@ -11,9 +11,10 @@ module Portless
 
     App = Struct.new(:name, :hostname, :port, :url, :pid, keyword_init: true)
 
-    def initialize(config: Config.load, route_store: RouteStore.new)
+    def initialize(config: Config.load, route_store: RouteStore.new, options: {})
       @config = config
       @route_store = route_store
+      @options = options # :force
       @apps = []
     end
 
@@ -38,7 +39,9 @@ module Portless
       prefix = @config.worktree_prefix
       hostname = "#{prefix ? "#{prefix}.#{name}" : name}.#{@config.tld}"
       url = display_url(hostname, proxy_port)
-      @route_store.add(hostname: hostname, port: port, pid: Process.pid, force: true)
+      # Same conflict semantics as the single-app path: a route held by another
+      # LIVE run raises unless --force (dead owners are reaped automatically).
+      @route_store.add(hostname: hostname, port: port, pid: Process.pid, force: !!@options[:force])
       # A bare command string runs through the shell (handles "bin/rails server").
       pid = Process.spawn(child_env(port, url), command, pgroup: true)
       App.new(name: name, hostname: hostname, port: port, url: url, pid: pid)

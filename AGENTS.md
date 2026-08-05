@@ -71,15 +71,41 @@ injected as `PORT`; the proxy routes the named host to it.
   (`--lan`: LanIp + mDNS `<name>.local`); public sharing (`--ngrok`/`--tailscale`/
   `--funnel`, experimental).
 
+- **Phase 5 ✅** end-to-end tests (`test/e2e_*_test.rb`, modeled on portless's
+  `tests/e2e`): a real proxy daemon on a high port + live backends. Cover
+  TLS/SNI, wildcard subdomains, X-Forwarded-*, HTTP/2, the WebSocket relay,
+  `run` lifecycle, and a real Rails app booted with the railtie.
+
 ### Roadmap (not yet built)
 
-- Windows CA trust + Task Scheduler service.
-- WebSocket upgrade relay hardening + HTTP/2 to the backend.
-- mDNS LAN-IP change monitoring (re-publish on network switch).
+Deliberately skipped for now (revisit on demand):
+
+- Windows CA trust + Task Scheduler service (no Windows machine to verify).
+- Custom certs (`proxy start --cert/--key` upstream) — niche; the local CA
+  covers the normal flow.
+- HTTP/2 to the backend, mDNS LAN-IP re-publish on network change, and a
+  brief backend retry-while-booting — low practical value in dev.
+- `PORTLESS_SYNC_HOSTS` auto hosts-sync (we keep `hosts sync` manual).
+
+### Test backlog
+
+- CLI arg edge cases (`alias` add/remove, `get`, `doctor` exit codes) and the
+  bin/dev → bin/rails resolved-command fallback.
+
+### Known divergences from portless (deliberate)
+
+- Wildcard subdomain fallback is always on (upstream defaults strict, opt-in
+  via `--wildcard`) — subdomain-per-tenant Rails apps are the headline here.
+- `portless.json` schema: `tld`/`tls` are ours; upstream keys `script`,
+  `proxy`, path-keyed `apps`, and package.json config don't apply to Ruby.
+- Health header is `x-rb-portless: <version>` (upstream: `X-Portless: 1`);
+  the version value drives the stale-proxy handshake.
 
 ## Conventions
 
 - Stdlib-first; the only runtime deps are `async` + `async-http` (for h1/h2/tls/ws).
 - Minitest + fixtures-free tests in `test/`; isolate state via `PORTLESS_STATE_DIR`.
+  The e2e layer (`test/e2e_helper.rb`) spawns the real daemon on a free high
+  port (no sudo) — Rails-stack gems in the Gemfile are test-only.
 - Mirror portless's naming/structure so the two stay diffable against
   `references/portless`.

@@ -28,7 +28,7 @@ module Portless
 
       warn "rb-portless: #{@config.tld_warning}" if @config.tld_warning
       ensure_trusted
-      proxy_port = Daemon.ensure_running(tls: @config.tls)
+      proxy_port = Daemon.ensure_running(tls: @config.tls, lan: !!@options[:lan])
       @route_store.add(hostname: hostname, port: port, pid: Process.pid, force: @options[:force])
 
       url = display_url(hostname, proxy_port)

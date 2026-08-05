@@ -31,6 +31,20 @@ class ProxyTest < Minitest::Test
     @store.remove("demo.localhost", owner_pid: Process.pid)
   end
 
+  # Tunnel-forwarded requests keep the public authority (upstream issue #297):
+  # a route's tailscale/ngrok URL must resolve to its backend too.
+  def test_share_hostnames_route_to_the_backend
+    @store.add(hostname: "demo.localhost", port: 4321, pid: Process.pid,
+               tailscale: "https://my-device.tail1234.ts.net:8443", ngrok: "https://abc.ngrok.app")
+    assert_equal 4321, @proxy.route_for("my-device.tail1234.ts.net:8443").port
+    assert_equal 4321, @proxy.route_for("my-device.tail1234.ts.net").port
+    assert_equal 4321, @proxy.route_for("abc.ngrok.app").port
+    assert_equal 4321, @proxy.route_for("abc.ngrok.app:443").port
+    assert_nil @proxy.route_for("unrelated.ts.net")
+  ensure
+    @store.remove("demo.localhost", owner_pid: Process.pid)
+  end
+
   def test_proxy_loop_is_rejected_with_508
     @store.add(hostname: "demo.localhost", port: 4321, pid: Process.pid)
     res = @proxy.call(request("demo.localhost", Portless::Proxy::HOP_HEADER => "5"))

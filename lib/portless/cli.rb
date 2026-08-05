@@ -43,7 +43,7 @@ module Portless
     def cmd_run(args)
       options, command = parse_run(args)
       if command.empty? && Config.load.apps.any?
-        Multi.new.run # monorepo: portless.json `apps` map
+        Multi.new(options: options).run # monorepo: portless.json `apps` map
       else
         Runner.new(command: command, options: options).run
       end
@@ -67,7 +67,7 @@ module Portless
     # --lan/--ip, sharing (--ngrok/--tailscale/--funnel), --name, --force,
     # --app-port. Everything after `--` is the command verbatim.
     def parse_run(args)
-      options = {}
+      options = env_run_options
       command = []
       i = 0
       while i < args.length
@@ -88,12 +88,27 @@ module Portless
       [ options, command ]
     end
 
+    # Flag defaults from the PORTLESS_* env contract (explicit flags override
+    # by being parsed after these are seeded).
+    def env_run_options
+      options = {}
+      options[:lan] = true if Portless.env_true?("PORTLESS_LAN")
+      options[:ngrok] = true if Portless.env_true?("PORTLESS_NGROK")
+      options[:tailscale] = true if Portless.env_true?("PORTLESS_TAILSCALE")
+      options[:funnel] = true if Portless.env_true?("PORTLESS_FUNNEL")
+      app_port = Integer(ENV["PORTLESS_APP_PORT"].to_s, exception: false)
+      options[:app_port] = app_port if app_port
+      options
+    end
+
     def cmd_proxy(args)
       case args.first
       when "start"
-        Daemon.start(tls: tls_flag(args), port: int_flag(args, "--port"), foreground: flag?("--foreground"))
+        Daemon.start(tls: tls_flag(args), port: int_flag(args, "--port"),
+                     foreground: flag?("--foreground"), lan: args.include?("--lan"))
       when "stop"    then Daemon.stop
-      when "restart" then Daemon.restart(tls: tls_flag(args), port: int_flag(args, "--port"))
+      when "restart" then Daemon.restart(tls: explicit_tls_flag(args), port: int_flag(args, "--port"),
+                                         lan: args.include?("--lan") || nil)
       when nil       then command_help("proxy")
       else invalid_action!("proxy start|stop|restart")
       end
@@ -163,12 +178,18 @@ module Portless
       force = args.include?("--force")
       pruned = RouteStore.new.prune
       killed = pruned.sum { |r| PortOwner.kill(r.port, force: force) }
+      # A dead run's tailscale serve/funnel registration outlives it — reap it.
+      pruned.each { |r| safe { Share::Tailscale.stop_url(r.tailscale) } if r.tailscale }
       note = killed.positive? ? ", killed #{killed} orphan process(es)" : ""
       ok "pruned #{pruned.size} stale route(s)#{note}"
     end
 
     def cmd_clean(_args)
+      RouteStore.new.routes.each { |r| safe { Share::Tailscale.stop_url(r.tailscale) } if r.tailscale }
       Daemon.stop
+      # Otherwise a boot service survives and resurrects the proxy against a
+      # state dir that no longer exists.
+      begin; Service.uninstall if Service.installed?; rescue StandardError; end
       begin; Trust.uninstall!; rescue StandardError; end
       begin; with_hosts_write([ "hosts", "clean" ]) { Hosts.clean }; rescue StandardError; end
       require "fileutils"
@@ -250,6 +271,15 @@ module Portless
       true
     end
 
+    # nil unless the user passed --tls/--no-tls — restart preserves the running
+    # daemon's mode by default.
+    def explicit_tls_flag(args)
+      return false if args.include?("--no-tls")
+      return true if args.include?("--tls")
+
+      nil
+    end
+
     def int_flag(args, name)
       i = args.index(name)
       i ? Integer(args[i + 1], exception: false) : nil
@@ -327,8 +357,9 @@ module Portless
                      flags: [ [ "--force", "overwrite an existing route" ] ],
                      example: "rb-portless alias postgres 5432   # -> https://postgres.localhost" },
       "proxy"   => { summary: "Manage the proxy daemon.",
-                     usage: [ "proxy start [--no-tls] [--port <n>]", "proxy stop",
-                              "proxy restart   (pick up an updated rb-portless)" ] },
+                     usage: [ "proxy start [--no-tls] [--port <n>] [--lan]", "proxy stop",
+                              "proxy restart   (pick up an updated rb-portless)" ],
+                     flags: [ [ "--lan", "listen on all interfaces (default: loopback only)" ] ] },
       "trust"   => { summary: "Trust the local CA so HTTPS works without warnings.",
                      usage: [ "trust" ] },
       "hosts"   => { summary: "Manage the /etc/hosts block (Safari / non-.localhost TLDs).",

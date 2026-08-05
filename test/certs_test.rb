@@ -43,4 +43,31 @@ class CertsTest < Minitest::Test
     assert_equal @certs.ca_fingerprint, @certs.ca_fingerprint
     assert_match(/\A[0-9a-f]{64}\z/, @certs.ca_fingerprint)
   end
+
+  def test_leaf_is_persisted_and_reloaded_across_instances
+    cert, = @certs.leaf_for("persist.localhost")
+    reloaded, key = Portless::Certs.new.leaf_for("persist.localhost")
+    assert_equal cert.serial, reloaded.serial # same cert from disk, not a re-mint
+    assert key
+  end
+
+  def test_an_expiring_leaf_is_reminted
+    cert, = @certs.leaf_for("expiring.localhost")
+    # Rewrite the persisted cert as one that expires within the 7-day buffer.
+    soon = OpenSSL::X509::Certificate.new(cert.to_pem)
+    soon.not_after = Time.now + 3600
+    soon.sign(@certs.ca_key, OpenSSL::Digest.new("SHA256"))
+    path = File.join(Portless::State.host_certs_dir, "expiring.localhost.pem")
+    File.write(path, soon.to_pem)
+
+    fresh, = Portless::Certs.new.leaf_for("expiring.localhost")
+    assert fresh.not_after > Time.now + 8 * 86_400, "expiring leaf was not re-minted"
+  end
+
+  def test_two_label_host_gets_no_wildcard_san
+    cert, = @certs.leaf_for("myapp.localhost")
+    san = cert.extensions.find { |e| e.oid == "subjectAltName" }.value
+    assert_includes san, "DNS:myapp.localhost"
+    refute_includes san, "*" # *.localhost is invalid at the reserved-TLD boundary
+  end
 end

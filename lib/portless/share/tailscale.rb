@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "json"
+require "uri"
 
 module Portless
   module Share
@@ -65,6 +66,23 @@ module Portless
         off(handle[:mode], handle[:port])
       end
 
+      # Teardown from a recorded share URL alone (clean/prune reaping a dead
+      # run's registration). The URL carries the HTTPS port (absent = 443); the
+      # mode isn't recorded, so turn off both — "not found" is a no-op.
+      def stop_url(url)
+        return unless url && Portless.which("tailscale")
+
+        port = begin
+          URI(url).port || 443
+        rescue StandardError
+          nil
+        end
+        return unless port
+
+        off("serve", port)
+        off("funnel", port)
+      end
+
       # Turn off ONLY the registration we created (scoped to our port).
       def off(mode, port)
         system("tailscale", mode, "--yes", "--https=#{port}", "off", out: File::NULL, err: File::NULL)
@@ -87,14 +105,19 @@ module Portless
       end
 
       # HTTPS ports the user's current serve config already occupies.
-      def used_serve_ports
-        config = JSON.parse(`tailscale serve status --json 2>/dev/null`)
+      def used_serve_ports(config = serve_status_json)
         ports = []
         (config["Web"] || {}).each_key { |host_port| ports << Regexp.last_match(1).to_i if host_port =~ /:(\d+)\z/ }
         (config["TCP"] || {}).each_key { |port| ports << port.to_i }
         ports
       rescue StandardError
         []
+      end
+
+      def serve_status_json
+        JSON.parse(`tailscale serve status --json 2>/dev/null`)
+      rescue StandardError
+        {}
       end
 
       def status_json
