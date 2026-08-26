@@ -45,7 +45,9 @@ module Portless
     end
 
     # Register (or replace) a route. Conflicts with a *live* different owner raise
-    # unless force, which SIGTERMs the incumbent. Alias routes use pid 0. Public
+    # unless force, which SIGTERMs the incumbent. Alias routes use pid 0: they
+    # count as live (never reaped) but have no process, so force just takes the
+    # hostname over. Public
     # share URLs (tailscale/ngrok), when present, are recorded so `list` can show
     # them while the run is active.
     def add(hostname:, port:, pid:, force: false, tailscale: nil, ngrok: nil, lan: false)
@@ -55,7 +57,7 @@ module Portless
         if existing && existing["pid"].to_i != pid.to_i && !dead?(existing["pid"])
           unless force
             raise RouteConflictError,
-                  "#{hostname} is already served by pid #{existing['pid']} — pass --force to take it over"
+                  "#{hostname} is already served by #{owner(existing)} — pass --force to take it over"
           end
           terminate(existing["pid"])
         end
@@ -154,8 +156,21 @@ module Portless
       true # exists, owned by someone else (e.g. root proxy)
     end
 
+    # Who to blame in a conflict message. An alias has no process behind it, so
+    # "pid 0" would be nonsense to read and impossible to go look up.
+    def owner(route)
+      route["pid"].to_i.zero? ? "a static alias" : "pid #{route['pid']}"
+    end
+
+    # Displace the route's current owner. Only a real pid gets signalled: 0 means
+    # "my whole process group" and a negative one means "that group", so passing
+    # an alias route straight through would TERM the very run asking for the
+    # takeover (and its shell job with it) instead of the incumbent.
     def terminate(pid)
-      Process.kill("TERM", pid.to_i)
+      pid = pid.to_i
+      return unless pid.positive?
+
+      Process.kill("TERM", pid)
     rescue StandardError
       nil
     end

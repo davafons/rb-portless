@@ -30,6 +30,33 @@ class ParityTest < Minitest::Test
     @store.remove("x.localhost")
   end
 
+  # An alias has pid 0, and pid 0 means "my process group" to kill(2): forcing
+  # over one used to TERM the run doing the forcing. `bin/dev --force` died with
+  # "Terminated: 15" before it ever reached the dev server.
+  def test_force_over_an_alias_replaces_it_without_signalling_anyone
+    @store.add(hostname: "x.localhost", port: 4000, pid: 0)
+
+    @store.add(hostname: "x.localhost", port: 4001, pid: Process.pid, force: true)
+
+    route = @store.routes.find { _1.hostname == "x.localhost" }
+    assert_equal 4001, route.port
+    assert_equal Process.pid, route.pid
+  ensure
+    @store.remove("x.localhost")
+  end
+
+  def test_conflict_with_an_alias_names_it_rather_than_pid_zero
+    @store.add(hostname: "x.localhost", port: 4000, pid: 0)
+
+    err = assert_raises(Portless::RouteConflictError) do
+      @store.add(hostname: "x.localhost", port: 4001, pid: Process.pid, force: false)
+    end
+    assert_match(/static alias/, err.message)
+    refute_match(/pid 0/, err.message)
+  ensure
+    @store.remove("x.localhost")
+  end
+
   # ── #3 / #8 port validation ──────────────────────────────────────────────
   def test_parse_port_validates_range
     cli = Portless::CLI.new([])

@@ -4,6 +4,19 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- **`run --force` killed the run doing the forcing.** Taking over a hostname
+  held by a *static alias* passed its pid straight to `kill`, and an alias
+  records pid 0 — which to `kill(2)` means "every process in my group". So
+  `bin/dev --force` TERMed itself and its shell job, printing `Terminated: 15`
+  before the dev server ever started. An alias has no owner process to displace,
+  so force now just takes the hostname over, and `terminate` refuses any pid
+  that isn't a real process. The conflict message you get *without* `--force`
+  now says "a static alias" instead of the unlookuppable "pid 0".
+
 ## [0.5.1]
 
 ### Security
