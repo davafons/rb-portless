@@ -1,0 +1,4 @@
+#!/bin/sh
+# Test-only guard: tests must never elevate.
+echo "test guard: refusing sudo during tests" >&2
+exit 1

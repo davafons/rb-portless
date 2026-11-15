@@ -14,14 +14,14 @@ class E2EDaemonTest < Minitest::Test
     port = E2E.free_port
     env = { "PORTLESS_STATE_DIR" => state, "PORTLESS_PORT" => port.to_s }
 
-    assert system(env, RbConfig.ruby, "-I", lib, exe, "proxy", "start",
+    assert system(env, RbConfig.ruby, "-I", lib, exe, "proxy", "start", "--skip-trust",
                   in: File::NULL, out: File::NULL, err: File::NULL),
            "proxy start (detached) failed"
     assert Portless::Health.proxy_running?(port), "daemon not answering after start"
     assert_equal port.to_s, File.read(File.join(state, "proxy.port")).strip
 
     # An idempotent second start must not spawn a rival daemon.
-    assert system(env, RbConfig.ruby, "-I", lib, exe, "proxy", "start",
+    assert system(env, RbConfig.ruby, "-I", lib, exe, "proxy", "start", "--skip-trust",
                   in: File::NULL, out: File::NULL, err: File::NULL)
 
     assert system(env, RbConfig.ruby, "-I", lib, exe, "proxy", "stop",

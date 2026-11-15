@@ -1,0 +1,4 @@
+#!/bin/sh
+# Test-only guard: tests must never touch NSS trust stores.
+echo "test guard: refusing certutil during tests" >&2
+exit 1

@@ -1,0 +1,9 @@
+#!/bin/sh
+# Test-only guard: tests must never change the macOS trust store.
+case "$1" in
+  add-trusted-cert|remove-trusted-cert|delete-certificate|add-certificates|import)
+    echo "test guard: refusing 'security $1' during tests" >&2
+    exit 1
+    ;;
+esac
+exec /usr/bin/security "$@"
