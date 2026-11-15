@@ -45,6 +45,7 @@ require_relative "portless/clean_utils"
 require_relative "portless/doctor"
 require_relative "portless/help"
 require_relative "portless/mcp"
+require_relative "portless/compose"
 require_relative "portless/cli"
 
 module Portless

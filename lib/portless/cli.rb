@@ -162,9 +162,7 @@ module Portless
       when "clean" then handle_clean(args)
       when "prune" then handle_prune(args)
       when "mcp" then Mcp.run(args[1..])
-      when "compose"
-        # Reserved upstream commands, not ported yet.
-        raise Error, "rb-portless #{command} is not supported yet."
+      when "compose" then Compose::Command.new(args[1..]).run
       end
     end
 

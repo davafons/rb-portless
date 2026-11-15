@@ -23,6 +23,7 @@ module Portless
           rb-portless get <name>              Print URL for a service
           rb-portless alias <name> <port>     Register a static route
           rb-portless alias --remove <name>   Remove a static route
+          rb-portless compose up [args...]    Run a Docker Compose project
           rb-portless list                    Show active routes and uptime
           rb-portless doctor                  Check local rb-portless health
           rb-portless trust                   Add local CA to system trust store
@@ -374,6 +375,44 @@ module Portless
           --help, -h             Show this help
 
       TEXT
+      "compose" => <<~'TEXT',
+
+        rb-portless compose - Run a Docker Compose project behind rb-portless.
+
+        Each service that publishes an HTTP port gets <service>.<project>.localhost.
+        Database and cache ports such as 5432, 3306, 6379, and 27017 keep their
+        published port.
+
+        Usage:
+          rb-portless compose up [args...]       Start the project and register routes
+          rb-portless compose up -d [args...]    Start detached; routes stay until down
+          rb-portless compose down [args...]     Stop the project and remove its routes
+          rb-portless compose <command> [args]   Any other compose command, unchanged
+
+        Global compose flags (-f, -p, --profile, --env-file, --project-directory) go
+        before the command, as with docker compose.
+
+        Examples:
+          rb-portless compose up                  # -> https://web.myapp.localhost
+          rb-portless compose -f compose.dev.yml up -d
+          rb-portless compose down
+
+        Service labels:
+          portless.enable: "false"     Leave the service and its ports unchanged
+          portless.name: <name>        Use <name> instead of the service name
+          portless.ports: 3000,9229    Route only these container ports
+
+        Notes:
+          rb-portless picks a free port on 127.0.0.1 for each HTTP port and reuses it,
+          so routes keep working after restart, after stop and start, and when Docker
+          restarts the container. A routed service can't scale past one container.
+          A service with several HTTP ports also gets <port>.<service>.<project>.
+          Each routed service gets __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS, so a Vite
+          dev server in a container accepts its rb-portless hostname.
+          Start the project with rb-portless compose up, because a plain docker compose
+          up recreates the containers with their original ports.
+
+      TEXT
       "prune" => <<~'TEXT',
 
         rb-portless prune - Clean up routes left by crashed rb-portless sessions.
@@ -424,5 +463,6 @@ end
     def print_trust_help = print_help_text("trust")
     def print_clean_help = print_help_text("clean")
     def print_prune_help = print_help_text("prune")
+    def print_compose_help = print_help_text("compose")
   end
 end
