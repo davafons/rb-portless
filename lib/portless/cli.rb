@@ -1,401 +1,984 @@
 # frozen_string_literal: true
 
+require "json"
+require "ipaddr"
+
 module Portless
-  # Hand-rolled command dispatch (no Thor/optparse ceremony, like portless's
-  # cli.ts). `rb-portless run <cmd>` is the main path; the rest manage the proxy,
-  # CA trust, hosts file, and diagnostics.
+  # Command dispatch. Mirrors portless's cli.ts main(): global flags
+  # (--lan/--ip/--tailscale/--funnel/--ngrok/--cloudflare/--script) are
+  # stripped only from the leading portless flag region and turned into
+  # PORTLESS_* env; then a reserved command word dispatches, zero args run the
+  # package.json dev script, and anything else is named mode
+  # (`rb-portless <name> <cmd…>`). UsageError → exit 2, other errors → 1.
   class CLI
-    COMMANDS = %w[run proxy trust hosts list doctor clean prune alias get service].freeze
+    include Help
+
+    INTERNAL_LAN_IP_FLAG = "--lan-ip-auto"
+    INTERNAL_LAN_IP_ENV = "PORTLESS_INTERNAL_LAN_IP"
+    GLOBAL_BOOLEAN_FLAGS = %w[--lan --tailscale --funnel --ngrok --cloudflare].freeze
+    GLOBAL_VALUE_FLAGS = [ "--ip", INTERNAL_LAN_IP_FLAG, "--script" ].freeze
+
+    RUN_FLAG_SPEC = {
+      "--name" => :value, "--prefix" => :text, "--force" => :boolean, "--app-port" => :value,
+      "--tailscale" => :boolean, "--funnel" => :boolean, "--ngrok" => :boolean, "--cloudflare" => :boolean,
+      "--help" => :boolean, "-h" => :boolean
+    }.freeze
+
+    APP_FLAG_SPEC = {
+      "--force" => :boolean, "--app-port" => :value, "--tailscale" => :boolean, "--funnel" => :boolean,
+      "--ngrok" => :boolean, "--cloudflare" => :boolean, "--help" => :boolean, "-h" => :boolean
+    }.freeze
+
+    NAMED_USAGE = [ "Usage:", "  rb-portless <name> <command...>", "Example:", "  rb-portless myapp next dev" ].freeze
+
+    # Raised to stop with an exit code after output was already printed
+    # (upstream's process.exit(n) mid-handler).
+    class Exit < StandardError
+      attr_reader :code
+
+      def initialize(code)
+        super("exit #{code}")
+        @code = code
+      end
+    end
+
+    ProxyState = Struct.new(:dir, :port, :tls, :tld, :tlds, :lan_mode, :lan_ip, keyword_init: true)
+
+    # Daemon.discover_state (discoverState) as a struct with readers.
+    def self.discover_state = state_struct(Daemon.discover_state)
+
+    def self.state_struct(hash)
+      return hash unless hash.is_a?(Hash)
+
+      ProxyState.new(**hash.slice(*ProxyState.members))
+    end
+
+    ParsedRunArgs = Struct.new(:force, :app_port, :name, :prefix, :command_args, keyword_init: true)
 
     def self.start(argv = ARGV)
-      new(argv).run
+      code = new(argv).main
+      exit(code || 0)
     end
 
     def initialize(argv)
-      @argv = argv.dup
+      @args = argv.dup
     end
 
-    def run
-      first = @argv.first
-      return print_version if %w[--version -v].include?(first)
-      return print_help if @argv.empty? || %w[--help -h].include?(first)
+    def main
+      dispatch || 0
+    rescue Exit => e
+      e.code
+    rescue UsageError => e
+      warn Colors.red("Error: #{e.message}", io: $stderr)
+      e.hints.each { |hint| warn Colors.blue(hint, io: $stderr) }
+      2
+    rescue Error => e
+      warn "#{Colors.red('Error:', io: $stderr)} #{e.message}"
+      e.hints.each { |hint| warn Colors.blue(hint, io: $stderr) } if e.respond_to?(:hints)
+      1
+    end
 
-      if COMMANDS.include?(first)
-        return command_help(first) if %w[--help -h].include?(@argv[1])
+    # ── main() ────────────────────────────────────────────────────────────
+    def dispatch
+      args = @args
+      apply_global_flags(args)
+      global_script = @global_script
 
-        send("cmd_#{first}", rest(first))
-      elsif first.start_with?("--")
-        cmd_run(@argv)        # leading flags (incl. --name) → run mode
-      else
-        cmd_named(@argv)      # `rb-portless <name> <command…>` shorthand
+      if args[0]&.start_with?("--name=")
+        args[0, 1] = [ "--name", args[0].delete_prefix("--name=") ]
       end
-    rescue Portless::NonInteractiveError => e
-      warn error_line(e.message)
-      exit 2
-    rescue Portless::Error => e
-      warn error_line(e.message)
-      exit 1
-    end
-
-    private
-
-    # ── Commands ────────────────────────────────────────────────────────────
-    def cmd_run(args)
-      options, command = parse_run(args)
-      if command.empty? && Config.load.apps.any?
-        Multi.new(options: options).run # monorepo: portless.json `apps` map
-      else
-        Runner.new(command: command, options: options).run
+      explicit_name = args[0] == "--name"
+      if explicit_name
+        args.shift
+        raise UsageError.new("--name requires an app name.", [ "  rb-portless --name <name> <command...>" ]) unless args[0]
       end
-    end
+      command = explicit_name || !Commands.command_name?(args[0]) ? nil : args[0]
+      run_command = command == "run"
 
-    # `rb-portless <name> <command…>`: run the command under the hostname <name>
-    # (portless's named-app shorthand). The first non-flag token is the name.
-    def cmd_named(args)
-      options, rest = parse_run(args)
-      name = rest.shift
-      if rest.empty?
-        raise Error, "no command given — try `rb-portless run #{name}` or `rb-portless #{name} <command>`"
+      if Portless.skip_proxy? && !explicit_name && !run_command && (args.empty? || args[0] == "--")
+        script_args = args[0] == "--" ? args[1..] : []
+        app_config = Config.load_app_config
+        script_name = global_script || app_config&.dig("script") || "dev"
+        forwarded = forward_script_extra_args(script_name, Dir.pwd, script_args)
+        resolved = Config.resolve_script_command(script_name, Dir.pwd, forwarded)
+        return RunSupport.spawn_command(resolved) if resolved
+
+        raise UsageError, "No command provided."
       end
 
-      options[:name] = name
-      Runner.new(command: rest, options: options).run
-    end
-
-    # Pull known flags out of the run args from anywhere before `--` (mirrors
-    # portless's global-flag stripping), leaving the command to execute. Flags:
-    # --lan/--ip, sharing (--ngrok/--tailscale/--funnel), --name, --force,
-    # --app-port. Everything after `--` is the command verbatim.
-    def parse_run(args)
-      options = env_run_options
-      command = []
-      i = 0
-      while i < args.length
-        case args[i]
-        when "--"          then command.concat(args[i + 1..]); break
-        when "--lan"       then options[:lan] = true
-        when "--ip"        then options[:ip] = args[i += 1]
-        when "--ngrok"     then options[:ngrok] = true
-        when "--tailscale" then options[:tailscale] = true
-        when "--funnel"    then options[:funnel] = true
-        when "--force"     then options[:force] = true
-        when "--name"      then options[:name] = args[i += 1]
-        when "--app-port"  then options[:app_port] = parse_port!(args[i += 1], "--app-port")
-        else command << args[i]
+      if Portless.skip_proxy? && (run_command || args.empty? || (args.length >= 2 && command.nil?))
+        parsed = run_command ? parse_run_args(args[1..]) : parse_app_args(args)
+        command_args = parsed.command_args
+        if command_args.empty? && run_command
+          app_config = Config.load_app_config
+          script_name = global_script || app_config&.dig("script") || "dev"
+          resolved = Config.resolve_script_command(script_name, Dir.pwd)
+          command_args = resolved if resolved
         end
-        i += 1
+        raise UsageError, "No command provided." if command_args.empty?
+
+        return RunSupport.spawn_command(command_args)
       end
-      [ options, command ]
+
+      if command
+        return send(HELP_PRINTERS.fetch(command)) if HELP_PRINTERS.key?(command) && Commands.help_flag?(args)
+
+        return run_named_command(command, args, global_script)
+      end
+
+      unless explicit_name
+        return print_help if [ "--help", "-h" ].include?(args[0])
+        if args.empty? || args[0] == "--"
+          extra = args[0] == "--" ? args[1..] : []
+          handled = handle_default_mode(global_script, extra)
+          return handled unless handled.nil?
+
+          return print_help
+        end
+        return print_version if [ "--version", "-v" ].include?(args[0])
+      end
+
+      handle_named_mode(args, explicit_name)
     end
 
-    # Flag defaults from the PORTLESS_* env contract (explicit flags override
-    # by being parsed after these are seeded).
-    def env_run_options
-      options = {}
-      options[:lan] = true if Portless.env_true?("PORTLESS_LAN")
-      options[:ngrok] = true if Portless.env_true?("PORTLESS_NGROK")
-      options[:tailscale] = true if Portless.env_true?("PORTLESS_TAILSCALE")
-      options[:funnel] = true if Portless.env_true?("PORTLESS_FUNNEL")
-      app_port = Integer(ENV["PORTLESS_APP_PORT"].to_s, exception: false)
-      options[:app_port] = app_port if app_port
-      options
-    end
+    HELP_PRINTERS = {
+      "get" => :print_get_help, "list" => :print_list_help, "proxy" => :print_proxy_help,
+      "service" => :print_service_help, "hosts" => :print_hosts_help, "doctor" => :print_doctor_help,
+      "trust" => :print_trust_help, "clean" => :print_clean_help, "prune" => :print_prune_help
+    }.freeze
 
-    def cmd_proxy(args)
-      case args.first
-      when "start"
-        Daemon.start(tls: tls_flag(args), port: int_flag(args, "--port"),
-                     foreground: flag?("--foreground"), lan: lan_flag(args) || false)
-      when "stop"    then Daemon.stop
-      when "restart" then Daemon.restart(tls: explicit_tls_flag(args), port: int_flag(args, "--port"),
-                                         lan: lan_flag(args))
-      when nil       then command_help("proxy")
-      else invalid_action!("proxy start|stop|restart")
+    def run_named_command(command, args, global_script)
+      case command
+      when "run" then handle_run_mode(args[1..], global_script)
+      when "get" then handle_get(args)
+      when "list" then handle_list(args)
+      when "alias" then handle_alias(args)
+      when "proxy" then handle_proxy(args)
+      when "service" then handle_service(args)
+      when "hosts" then handle_hosts(args)
+      when "doctor" then handle_doctor(args)
+      when "trust" then CLI.handle_trust(args)
+      when "clean" then handle_clean(args)
+      when "prune" then handle_prune(args)
+      when "mcp", "compose"
+        # Reserved upstream commands, not ported yet.
+        raise Error, "rb-portless #{command} is not supported yet."
       end
     end
 
-    def cmd_trust(_args)
-      if Trust.trusted?
-        info "CA already trusted"
+    # The leading portless flag region: global flags (plus `run`'s own) up to
+    # the first word that belongs to the wrapped command.
+    def global_flag_end(args)
+      sep = args.index("--")
+      limit = sep || args.length
+      index = advance_flags(args, 0, limit, [ "--app-port" ])
+      return limit if index >= limit
+
+      mode = args[index]
+      return index if %w[mcp compose].include?(mode)
+      return advance_flags(args, index + 1, limit, %w[--name --prefix --app-port]) if mode == "run"
+      return limit if Commands.command_name?(mode) || %w[--version -v].include?(mode)
+
+      index += mode == "--name" ? 2 : 1
+      advance_flags(args, index, limit, [ "--app-port" ])
+    end
+
+    def advance_flags(args, index, limit, local_value_flags)
+      while index < limit
+        arg = args[index]
+        eq = arg.start_with?("--") ? arg.index("=") : nil
+        flag = eq ? arg[0...eq] : arg
+        if GLOBAL_BOOLEAN_FLAGS.include?(flag) || %w[--force --help -h].include?(flag)
+          index += 1
+        elsif GLOBAL_VALUE_FLAGS.include?(flag) || local_value_flags.include?(flag)
+          index += eq ? 1 : 2
+        else
+          break
+        end
+      end
+      index
+    end
+
+    # => true (boolean found), String (value), false (value missing), nil (absent)
+    def strip_global_flag(args, flag, has_value)
+      last = global_flag_end(args)
+      idx = args.each_index.find { |i| i < last && (args[i] == flag || (has_value && args[i].start_with?("#{flag}="))) }
+      return nil if idx.nil?
+
+      unless has_value
+        args.delete_at(idx)
+        return true
+      end
+      eq = args[idx].index("=")
+      value = eq ? args[idx][(eq + 1)..] : args[idx + 1]
+      return false if value.nil? || value.empty? || value.start_with?("-")
+
+      args.slice!(idx, eq ? 1 : 2)
+      value
+    end
+
+    def apply_global_flags(args)
+      ENV["PORTLESS_LAN"] = "1" if strip_global_flag(args, "--lan", false)
+
+      ip_hint = [ "  rb-portless --lan --ip 192.168.1.42 run <command>" ]
+      ip = strip_global_flag(args, "--ip", true)
+      raise UsageError.new("--ip requires an IP address.", ip_hint) if ip == false
+      if ip.is_a?(String)
+        raise UsageError.new("--ip requires an IP address, but got \"#{ip}\".", ip_hint) unless ip_address?(ip)
+
+        ENV["PORTLESS_LAN_IP"] = ip
+        ENV["PORTLESS_LAN"] = "1"
+      end
+
+      auto_ip = strip_global_flag(args, INTERNAL_LAN_IP_FLAG, true)
+      raise UsageError, "#{INTERNAL_LAN_IP_FLAG} requires an IP address." if auto_ip == false
+      if auto_ip.is_a?(String)
+        ENV[INTERNAL_LAN_IP_ENV] = auto_ip
+        ENV["PORTLESS_LAN"] = "1"
+      end
+
+      ENV["PORTLESS_TAILSCALE"] = "1" if strip_global_flag(args, "--tailscale", false)
+      if strip_global_flag(args, "--funnel", false)
+        ENV["PORTLESS_FUNNEL"] = "1"
+        ENV["PORTLESS_TAILSCALE"] = "1"
+      end
+      ENV["PORTLESS_NGROK"] = "1" if strip_global_flag(args, "--ngrok", false)
+      ENV["PORTLESS_CLOUDFLARE"] = "1" if strip_global_flag(args, "--cloudflare", false)
+
+      script = strip_global_flag(args, "--script", true)
+      raise UsageError.new("--script requires a script name.", [ "  rb-portless --script start" ]) if script == false
+
+      @global_script = script.is_a?(String) ? script : nil
+    end
+
+    def ip_address?(value)
+      IPAddr.new(value)
+      !value.include?("/")
+    rescue IPAddr::Error
+      false
+    end
+
+    # ── run / named mode argument parsing ─────────────────────────────────
+    def parse_app_port(value)
+      raise UsageError, "--app-port requires a port number." if value.nil? || value.start_with?("--")
+
+      Utils.parse_port(value) or raise UsageError, "Invalid app port \"#{value}\". Must be 1-65535."
+    end
+
+    def app_port_from_env
+      value = ENV["PORTLESS_APP_PORT"]
+      return nil if value.nil? || value.empty?
+
+      port = Utils.parse_port(value)
+      unless port
+        warn Colors.red("Error: Invalid PORTLESS_APP_PORT=\"#{value}\". Must be 1-65535.", io: $stderr)
+        raise Exit, 1
+      end
+      port
+    end
+
+    def enable_sharing_flag(flag)
+      case flag
+      when "--tailscale" then ENV["PORTLESS_TAILSCALE"] = "1"
+      when "--funnel"
+        ENV["PORTLESS_FUNNEL"] = "1"
+        ENV["PORTLESS_TAILSCALE"] = "1"
+      when "--ngrok" then ENV["PORTLESS_NGROK"] = "1"
+      when "--cloudflare" then ENV["PORTLESS_CLOUDFLARE"] = "1"
+      end
+    end
+
+    def parse_run_args(args)
+      parsed = ParsedRunArgs.new(force: false)
+      parsed.command_args = Args.visit_leading_flags("run", args, RUN_FLAG_SPEC) do |flag, value|
+        if [ "--help", "-h" ].include?(flag)
+          print_run_help
+          raise Exit, 0
+        end
+        case flag
+        when "--force" then parsed.force = true
+        when "--app-port" then parsed.app_port = parse_app_port(value)
+        when "--name" then parsed.name = value
+        when "--prefix" then parsed.prefix = value
+        else enable_sharing_flag(flag)
+        end
+      end
+      parsed.app_port ||= app_port_from_env
+      parsed
+    end
+
+    def parse_app_args(args)
+      parsed = ParsedRunArgs.new(force: false)
+      read_flag = lambda do |flag, value|
+        if [ "--help", "-h" ].include?(flag)
+          print_run_help
+          raise Exit, 0
+        end
+        if flag == "--force" then parsed.force = true
+        elsif flag == "--app-port" then parsed.app_port = parse_app_port(value)
+        else enable_sharing_flag(flag)
+        end
+      end
+      after = Args.visit_leading_flags("", args, APP_FLAG_SPEC, &read_flag)
+      parsed.name = after[0]
+      command_args = after[1..] || []
+      if !command_args.empty? && (command_args[0].start_with?("--") || command_args[0] == "-h")
+        command_args = Args.visit_leading_flags("", command_args, APP_FLAG_SPEC, &read_flag)
+      end
+      parsed.command_args = command_args
+      parsed.app_port ||= app_port_from_env
+      parsed
+    end
+
+    # Name + whether a command follows, read before flags are validated so a
+    # misspelled command is reported instead of its flags.
+    def read_named_args(args)
+      stop = args.index("--")
+      region = stop ? args[0...stop] : args
+      words = region.each_with_index.reject { |a, i| a.start_with?("-") || (i.positive? && region[i - 1] == "--app-port") }
+                    .map(&:first)
+      words.concat(args[(stop + 1)..]) if stop
+      [ words[0], words.length > 1 ]
+    end
+
+    def truncate_name(name) = name.split(".", -1).map { |l| Auto.truncate_label(l) }.join(".")
+
+    def new_store(dir)
+      RouteStore.new(dir, on_warning: ->(msg) { warn Colors.yellow(msg, io: $stderr) })
+    end
+
+    def run_app(name:, command_args:, force:, auto_info:, desired_port:)
+      state = CLI.discover_state
+      Runner.new(store: new_store(state.dir), proxy_port: state.port, state_dir: state.dir, name: name,
+                 command_args: command_args, tls: state.tls, tlds: state.tlds, force: force,
+                 auto_info: auto_info, desired_port: desired_port, lan_mode: state.lan_mode,
+                 lan_ip: state.lan_ip).run
+    end
+
+    def handle_run_mode(args, global_script)
+      parsed = parse_run_args(args)
+      ENV["PORTLESS_PREFIX"] = parsed.prefix unless parsed.prefix.nil?
+      app_config = Config.load_app_config
+
+      if parsed.command_args.empty?
+        script_name = global_script || app_config&.dig("script") || "dev"
+        resolved = Config.resolve_script_command(script_name, Dir.pwd)
+        parsed.command_args = resolved if resolved
+      end
+      if parsed.command_args.empty?
+        raise UsageError.new("No command provided.",
+                             [ "Usage:", "  rb-portless run <command...>", "Example:", "  rb-portless run next dev" ])
+      end
+
+      if parsed.name
+        base_name = truncate_name(parsed.name)
+        name_source = "--name flag"
+      elsif app_config&.dig("name")
+        base_name = truncate_name(app_config["name"])
+        name_source = app_config["source"]
       else
-        Trust.install!
-        ok "local CA trusted"
+        inferred = Auto.infer_project_name
+        base_name = inferred.name
+        name_source = inferred.source
       end
+      parsed.app_port ||= app_config&.dig("appPort")
+
+      worktree = Auto.detect_worktree_prefix(Dir.pwd, app_config&.dig("worktree", "prefix"))
+      effective = Auto.apply_worktree_prefix(base_name, worktree, app_config&.dig("worktree", "hostnameTemplate"))
+      run_app(name: effective, command_args: parsed.command_args, force: parsed.force,
+              auto_info: Runner::AutoInfo.new(name_source: name_source, base_name: base_name,
+                                              prefix: worktree&.prefix, prefix_source: worktree&.source),
+              desired_port: parsed.app_port)
     end
 
-    def cmd_list(_args)
-      routes = RouteStore.new.routes
-      return puts(Colors.dim("rb-portless: no active routes")) if routes.empty?
+    def handle_named_mode(args, explicit_name)
+      name, has_command = read_named_args(args)
+      suggestion = explicit_name || has_command ? nil : Commands.suggest_command(name)
+      if name && suggestion
+        raise UsageError.new("No command provided.",
+                             [ "\"#{name}\" is not a rb-portless command. Did you mean:", "  rb-portless #{suggestion}",
+                               *NAMED_USAGE ])
+      end
 
+      parsed = parse_app_args(args)
+      raise UsageError.new("No command provided.", NAMED_USAGE) if parsed.command_args.empty?
+
+      parsed.app_port ||= Config.load_app_config&.dig("appPort")
+      safe_name = truncate_name(parsed.name)
+      Utils.parse_hostname(safe_name, Utils::DEFAULT_TLD)
+      run_app(name: safe_name, command_args: parsed.command_args, force: parsed.force, auto_info: nil,
+              desired_port: parsed.app_port)
+    end
+
+    # ── zero-arg mode ─────────────────────────────────────────────────────
+    # nil → not handled (print help).
+    def handle_default_mode(global_script, extra_args)
+      cwd = Dir.pwd
+      ws_root = Workspace.find_workspace_root(cwd)
+      if ws_root == File.expand_path(cwd)
+        packages = Workspace.discover_workspace_packages(cwd)
+        ws_script = global_script || Config.load_config(cwd)&.config&.dig("script") || "dev"
+        return Multi.new(cwd, global_script, extra_args).run if packages.any? { |p| p.scripts[ws_script] }
+      end
+
+      app_config = Config.load_app_config(cwd)
+      script_name = global_script || app_config&.dig("script") || "dev"
+      return nil unless Config.script?(script_name, cwd)
+
+      handle_default_single(cwd, script_name, app_config, extra_args)
+    end
+
+    def forward_script_extra_args(script_name, package_dir, extra_args)
+      return [] if extra_args.empty?
+
+      forwarding = Frameworks.resolve_script_arg_forwarding(script_name, package_dir)
+      forwarded = extra_args.join(" ")
+      case forwarding[:kind]
+      when "unsafe"
+        raise UsageError.new(
+          "Cannot forward arguments through the \"#{forwarding[:script_name]}\" script. It has shell operators or a comment.",
+          [ "Run the command directly: rb-portless run <command> #{forwarded}",
+            "Or change the \"#{forwarding[:script_name]}\" script to a single command." ]
+        )
+      when "too-deep"
+        raise UsageError.new(
+          "Cannot forward arguments through the \"#{script_name}\" script. It runs through too many package " \
+          "scripts, or the scripts call each other in a loop.",
+          [ "Run the command directly: rb-portless run <command> #{forwarded}" ]
+        )
+      end
+      separators = forwarding[:kind] == "forward" ? forwarding[:separators] : 0
+      Array.new(separators, "--") + extra_args
+    end
+
+    def handle_default_single(cwd, script_name, app_config, extra_args)
+      forwarded = forward_script_extra_args(script_name, cwd, extra_args)
+      resolved = Config.resolve_script_command(script_name, cwd, forwarded)
+      unless resolved
+        warn Colors.red("Error: No \"#{script_name}\" script found in package.json.", io: $stderr)
+        return 1
+      end
+
+      if app_config&.dig("name")
+        base_name = truncate_name(app_config["name"])
+        name_source = app_config["source"]
+      else
+        inferred = Auto.infer_project_name(cwd)
+        base_name = inferred.name
+        name_source = inferred.source
+      end
+      worktree = Auto.detect_worktree_prefix(cwd, app_config&.dig("worktree", "prefix"))
+      effective = Auto.apply_worktree_prefix(base_name, worktree, app_config&.dig("worktree", "hostnameTemplate"))
+      run_app(name: effective, command_args: resolved, force: false,
+              auto_info: Runner::AutoInfo.new(name_source: name_source, base_name: base_name,
+                                              prefix: worktree&.prefix, prefix_source: worktree&.source),
+              desired_port: app_port_from_env || app_config&.dig("appPort"))
+    end
+
+    # ── get / list / alias ────────────────────────────────────────────────
+    def handle_get(args)
+      parsed = Args.parse_command_args("get", args[1..], { "--no-worktree" => :boolean, "--json" => :boolean }, 1)
+      name = parsed.positionals[0]
+      unless name
+        raise UsageError.new("Missing service name.",
+                             [ "Usage:", "  rb-portless get <name>", "Example:", "  rb-portless get backend" ])
+      end
+
+      skip = parsed.has?("--no-worktree")
+      app_config = skip ? nil : Config.load_app_config
+      worktree = skip ? nil : Auto.detect_worktree_prefix(Dir.pwd, app_config&.dig("worktree", "prefix"))
+      effective = Auto.apply_worktree_prefix(name, worktree, app_config&.dig("worktree", "hostnameTemplate"))
+      state = CLI.discover_state
+      hostname = Runner.build_hostnames(effective, state.tlds).first
+      url = Utils.format_url(hostname, state.port, state.tls)
+      $stdout.puts(parsed.has?("--json") ? JSON.generate({ name: name, hostname: hostname, url: url }) : url)
+      0
+    end
+
+    def handle_list(args)
+      json = Args.parse_command_args("list", args[1..], { "--json" => :boolean }, 0).has?("--json")
+      state = CLI.discover_state
+      list_routes(new_store(state.dir), state.port, state.tls, json)
+      0
+    end
+
+    def list_routes(store, proxy_port, tls, json)
+      routes = store.load_routes
+      if json
+        output = routes.map do |r|
+          h = { hostname: r.hostname, url: Utils.format_url(r.hostname, proxy_port, tls), port: r.port, pid: r.pid,
+                registeredAt: r.registered_at }
+          h[:upstream] = r.upstream if r.upstream
+          h[:tailscaleUrl] = r.tailscale_url if r.tailscale_url
+          h[:tailscaleFunnel] = r.tailscale_funnel unless r.tailscale_funnel.nil?
+          h[:ngrokUrl] = r.ngrok_url if r.ngrok_url
+          h[:cloudflareUrl] = r.cloudflare_url if r.cloudflare_url
+          h.compact
+        end
+        puts JSON.generate({ routes: output })
+        return
+      end
+
+      if routes.empty?
+        puts Colors.yellow("No active routes.")
+        puts Colors.gray("Start an app with: rb-portless <name> <command>")
+        return
+      end
+
+      puts Colors.bold("\nActive routes:\n")
+      now = (Time.now.to_f * 1000).to_i
       routes.each do |r|
-        tag = r.alias? ? "alias" : "pid #{r.pid}"
-        puts "#{Colors.cyan(r.hostname.ljust(40))} → :#{r.port}  #{Colors.dim("(#{tag})")}"
-        puts "    #{Colors.dim('↳ tailnet')} #{Colors.green(r.tailscale)}" if r.tailscale
-        puts "    #{Colors.dim('↳ ngrok  ')} #{Colors.green(r.ngrok)}" if r.ngrok
+        url = Utils.format_url(r.hostname, proxy_port, tls)
+        upstream = r.upstream
+        endpoint = upstream ? "#{upstream[:tls] ? 'https' : 'http'}://localhost:#{r.port}" : "localhost:#{r.port}"
+        label = r.pid.to_i.zero? ? "(alias)" : "(pid #{r.pid})"
+        uptime = r.pid.to_i.zero? ? nil : Utils.format_uptime(r.registered_at, now)
+        puts "  #{url}  #{Colors.gray('->')}  #{endpoint}  #{Colors.gray(label)}#{uptime ? " #{Colors.gray("up #{uptime}")}" : ''}"
+        puts "    #{Colors.gray('Host:')} #{upstream[:host]}" if upstream&.dig(:host)
+        if r.tailscale_url
+          puts "    #{Colors.gray("#{r.tailscale_funnel ? 'funnel' : 'tailscale'}:")} #{r.tailscale_url}"
+        end
+        Tunnel::PROCESS_TUNNELS.each do |t|
+          url = r[t[:url_field]]
+          puts "    #{Colors.gray("#{t[:label].downcase}:")} #{url}" if url
+        end
       end
+      puts
     end
 
-    def cmd_hosts(args)
-      case args.first
-      when "sync"
-        hostnames = RouteStore.new.routes.map(&:hostname).uniq
-        with_hosts_write([ "hosts", "sync" ]) { Hosts.sync(hostnames) }
-        ok "synced #{hostnames.size} host(s) to #{Hosts.file}"
-      when "clean"
-        with_hosts_write([ "hosts", "clean" ]) { Hosts.clean }
-        ok "cleaned #{Hosts.file}"
-      when nil then command_help("hosts")
-      else invalid_action!("hosts sync|clean")
+    def parse_alias_upstream(value)
+      usage = 'Use "https", "https://<host>[:<port>]", or "http://<host>[:<port>]".'
+      upstream =
+        if value == "https"
+          { tls: true }
+        else
+          m = %r{\A(https?)://(.+)\z}m.match(value)
+          raise Error, usage unless m
+
+          { tls: m[1] == "https", host: m[2] }
+        end
+      unless RouteStore.valid_upstream?(upstream)
+        raise Error, "#{usage} The authority must be a hostname or IP with an optional port."
       end
+
+      upstream
     end
 
-    def cmd_alias(args)
-      if args.first == "--remove"
-        name = args[1] or abort_usage("alias --remove <name>")
-        host = hostname_for(name)
-        raise Error, "no alias found for #{host}" unless RouteStore.new.remove(host, owner_pid: 0)
-        ok "removed alias #{host}"
-      else
-        name, port = args.reject { |a| a.start_with?("--") }
-        abort_usage("alias <name> <port> [--force]") unless name && port
-        host = hostname_for(name)
-        port = parse_port!(port, "port")
-        RouteStore.new.add(hostname: host, port: port, pid: 0, force: args.include?("--force"))
-        ok "#{host} → :#{port}"
+    def handle_alias(args)
+      upstream_help = args.each_with_index.any? { |a, i| a == "--upstream" && %w[--help -h].include?(args[i + 1]) }
+      return print_alias_help if Commands.help_flag?(args) && !upstream_help
+
+      parsed = Args.parse_command_args("alias", args[1..],
+                                       { "--remove" => :value, "--force" => :boolean, "--tld" => :value,
+                                         "--upstream" => :value }, 2)
+      remove = parsed.has?("--remove")
+      remove_name = parsed.value("--remove")
+      alias_name, alias_port = parsed.positionals
+      usage = [ "Usage:", "  rb-portless alias <name> <port>", "  rb-portless alias --remove <name>", "Example:",
+                "  rb-portless alias my-postgres 5432" ]
+      see = [ "See: rb-portless alias --help" ]
+      raise UsageError.new("--force cannot be used with --remove.", usage) if remove && parsed.has?("--force")
+      if remove && !parsed.positionals.empty?
+        raise UsageError.new("Unexpected argument \"#{parsed.positionals[0]}\" for rb-portless alias.", see)
       end
-    end
+      raise UsageError.new("Missing alias name.", usage) if !remove && !alias_name
+      raise UsageError.new("Missing port.", usage) if !remove && !alias_port
+      raise UsageError.new("--remove may be specified only once.", see) if parsed.values("--remove").length > 1
 
-    def cmd_get(args)
-      worktree = !args.include?("--no-worktree")
-      name = args.find { |a| !a.start_with?("--") } or abort_usage("get <name> [--no-worktree]")
-      config = Config.load
-      host = hostname_for(name)
-      host = "#{config.worktree_prefix}.#{host}" if worktree && config.worktree_prefix
-      puts "#{config.tls ? 'https' : 'http'}://#{host}"
-    end
+      upstream_values = parsed.values("--upstream")
+      raise UsageError.new("--upstream may be specified only once.", see) if upstream_values.length > 1
+      raise UsageError.new("--upstream can only be used when adding an alias.", see) if remove && !upstream_values.empty?
 
-    def cmd_prune(args)
-      force = args.include?("--force")
-      pruned = RouteStore.new.prune
-      killed = pruned.sum { |r| PortOwner.kill(r.port, force: force) }
-      # A dead run's tailscale serve/funnel registration outlives it — reap it.
-      pruned.each { |r| safe { Share::Tailscale.stop_url(r.tailscale) } if r.tailscale }
-      note = killed.positive? ? ", killed #{killed} orphan process(es)" : ""
-      ok "pruned #{pruned.size} stale route(s)#{note}"
-    end
-
-    def cmd_clean(_args)
-      RouteStore.new.routes.each { |r| safe { Share::Tailscale.stop_url(r.tailscale) } if r.tailscale }
-      Daemon.stop
-      # Otherwise a boot service survives and resurrects the proxy against a
-      # state dir that no longer exists.
-      begin; Service.uninstall if Service.installed?; rescue StandardError; end
-      begin; Trust.uninstall!; rescue StandardError; end
-      begin; with_hosts_write([ "hosts", "clean" ]) { Hosts.clean }; rescue StandardError; end
-      require "fileutils"
-      FileUtils.rm_rf(State.dir)
-      ok "removed all state"
-    end
-
-    def cmd_doctor(args)
-      extra = args.reject { |a| %w[--help -h].include?(a) }
-      raise Error, "unknown argument #{extra.first.inspect}" unless extra.empty?
-
-      port = Health.discover_port
-      routes = RouteStore.new.routes
-      report = [
-        [ "Ruby >= 3.2", Gem::Version.new(RUBY_VERSION) >= Gem::Version.new("3.2"), RUBY_VERSION ],
-        [ "state dir", File.directory?(State.dir), State.dir ],
-        [ "proxy running", !port.nil?, port ? "on :#{port}" : "not running" ],
-        [ "CA generated", File.exist?(State.ca_cert), nil ],
-        [ "CA trusted", safe { Trust.trusted? }, safe { Trust.trusted? } ? nil : "run `rb-portless trust`" ],
-        [ "routes", true, "#{routes.size} active" ]
-      ]
-      report.each do |label, pass, note|
-        mark = pass ? Colors.green("✓") : Colors.red("✗")
-        puts "  #{mark} #{label}#{note ? " — #{Colors.dim(note)}" : ''}"
+      upstream = nil
+      if upstream_values.length == 1
+        begin
+          upstream = parse_alias_upstream(upstream_values[0])
+        rescue Error => e
+          raise UsageError.new("Invalid --upstream value. #{e.message}", see)
+        end
       end
-      exit 1 if report.any? { |_label, pass, _note| !pass }
-    end
 
-    def cmd_service(args)
-      case args.first
-      when "install" then Service.install(tls: tls_flag(args), port: int_flag(args, "--port"))
-      when "uninstall" then Service.uninstall
-      when "status" then Service.status
-      when nil then command_help("service")
-      else invalid_action!("service install|uninstall|status")
+      tld_values = parsed.values("--tld")
+      raise UsageError.new("--tld requires a TLD value.", see) if tld_values.any? { |v| v.strip.empty? }
+
+      target_tlds = nil
+      unless tld_values.empty?
+        begin
+          target_tlds = tld_values.flat_map { |v| Utils.parse_tld_list(v) }.uniq
+        rescue Error => e
+          raise UsageError.new(e.message, see)
+        end
       end
+      port = alias_port ? Utils.parse_port(alias_port) : nil
+      raise UsageError.new("Invalid port \"#{alias_port}\". Must be 1-65535.", usage) if !remove && port.nil?
+
+      state = CLI.discover_state
+      if target_tlds && (unconfigured = target_tlds.find { |t| !state.tlds.include?(t) })
+        warn Colors.red("Error: TLD \"#{unconfigured}\" is not configured (#{state.tlds.join(', ')}).", io: $stderr)
+        return 1
+      end
+      store = new_store(state.dir)
+      store.recover_corrupt_routes_file
+
+      if remove
+        hostnames = Runner.build_hostnames(remove_name, state.tlds, target_tlds)
+        routes = store.load_routes
+        aliases = hostnames.select { |h| routes.any? { |r| r.hostname == h && r.pid.to_i.zero? } }
+        if aliases.empty?
+          warn Colors.red("Error: No alias found for \"#{hostnames.join(', ')}\".", io: $stderr)
+          return 1
+        end
+        Runner.remove_routes(store, aliases, 0)
+        puts Colors.green("Removed alias: #{aliases.join(', ')}")
+        return 0
+      end
+
+      hostnames = Runner.build_hostnames(alias_name, state.tlds, target_tlds)
+      Runner.add_routes(store, hostnames, port, 0, parsed.has?("--force"), upstream)
+      puts Colors.green("Alias registered: #{hostnames.join(', ')} -> 127.0.0.1:#{port}")
+      0
     end
 
-    # ── Shared helpers ────────────────────────────────────────────────────
-    # /etc/hosts (and boot service) writes need root; retry once under sudo.
-    def with_hosts_write(reexec_args)
+    # ── proxy / service / hosts ───────────────────────────────────────────
+    def parse_port_flag!(value)
+      Utils.parse_port(value) or raise UsageError.new("Invalid port number: #{value}", [ "Port must be between 1 and 65535." ])
+    end
+
+    def handle_proxy(args)
+      sub = args[1]
+      if sub && ![ "start", "stop" ].include?(sub)
+        raise UsageError.new("Unknown proxy subcommand \"#{sub}\".", [ "See: rb-portless proxy --help" ])
+      end
+      return print_proxy_help unless sub
+
+      if sub == "stop"
+        parsed = Args.parse_command_args("proxy stop", args[2..], { "--port" => :value, "-p" => :value }, 0)
+        (parsed.values("--port") + parsed.values("-p")).each { |v| parse_port_flag!(v) }
+        value = parsed.value("--port") || parsed.value("-p")
+        return Daemon.stop(port: value && Utils.parse_port(value)) ? 0 : 1
+      end
+
+      flags = Args.parse_command_args(
+        "proxy start", args[2..],
+        { "--foreground" => :boolean, "--skip-trust" => :boolean, "--unprivileged" => :boolean,
+          "--https" => :boolean, "--no-tls" => :boolean, "--wildcard" => :boolean, "--cert" => :value,
+          "--key" => :value, "--port" => :value, "-p" => :value, "--tld" => :value }, 0
+      )
+      cert = flags.value("--cert")
+      key = flags.value("--key")
+      raise UsageError, "--cert and --key must be used together." if cert.nil? != key.nil?
+
+      port_value = flags.value("--port") || flags.value("-p")
+      port = port_value && parse_port_flag!(port_value)
+      tlds = nil
+      unless flags.values("--tld").empty?
+        begin
+          tlds = flags.values("--tld").flat_map { |v| Utils.parse_tld_list(v) }.uniq
+        rescue Error => e
+          raise UsageError.new(e.message, [ "See: rb-portless proxy start --help" ])
+        end
+      end
+      result = Daemon.start(port: port, https: flags.has?("--https"), no_tls: flags.has?("--no-tls"),
+                            tlds: tlds, wildcard: flags.has?("--wildcard"),
+                            unprivileged: flags.has?("--unprivileged"), cert: cert, key: key,
+                            skip_trust: flags.has?("--skip-trust"), foreground: flags.has?("--foreground"))
+      result.is_a?(Integer) ? result : 0
+    end
+
+    # handleService (incl. parseServiceInstallConfig) lives in service.ts
+    # upstream, so Service owns it.
+    def handle_service(args)
+      Service.handle(args)
+      0
+    end
+
+    def hosts_ok?
       yield
-    rescue Portless::Error
-      raise if Privilege.root? || !Privilege.reexec_with_sudo(reexec_args)
-    end
-
-    def hostname_for(name)
-      name.include?(".") ? name : "#{name}.#{Config.load.tld}"
-    end
-
-    def safe
-      yield
+      true
     rescue StandardError
       false
     end
 
-    def abort_usage(usage)
-      warn error_line("usage: rb-portless #{usage}")
-      exit 1
+    def handle_hosts(args)
+      sub = args[1]
+      return print_hosts_help unless sub
+      unless %w[sync clean].include?(sub)
+        raise UsageError.new("Unknown hosts subcommand \"#{sub}\".", [ "See: rb-portless hosts --help" ])
+      end
+
+      Args.parse_command_args("hosts #{sub}", args[2..], {}, 0)
+      if sub == "clean"
+        if hosts_ok? { Hosts.clean }
+          puts Colors.green("Removed rb-portless entries from #{Hosts.file}.")
+          return 0
+        end
+        return 0 if !Privilege.root? && Privilege.reexec_with_sudo(%w[hosts clean])
+
+        warn Colors.red("Failed to update #{Hosts.file}.", io: $stderr)
+        return 1
+      end
+
+      state = CLI.discover_state
+      store = new_store(state.dir)
+      if store.respond_to?(:untrusted_reason) && (unsafe = store.untrusted_reason)
+        warn Colors.red("Cannot sync hosts from routes recorded in #{state.dir}: #{unsafe}", io: $stderr)
+        return 1
+      end
+      hostnames = store.load_routes.map(&:hostname)
+      if hosts_ok? { Hosts.sync(hostnames) }
+        if hostnames.empty?
+          puts Colors.green("No stale rb-portless entries remain in #{Hosts.file}.")
+        else
+          puts Colors.green("Synced #{hostnames.length} hostname(s) to #{Hosts.file}:")
+          hostnames.each { |h| puts "  127.0.0.1 #{h}" }
+        end
+        return 0
+      end
+      unless Privilege.root?
+        puts Colors.yellow("Writing to #{Hosts.file} requires elevated privileges. Requesting sudo...")
+        return 0 if Privilege.reexec_with_sudo(%w[hosts sync])
+      end
+      warn Colors.red("Failed to update #{Hosts.file}.", io: $stderr)
+      1
     end
 
-    # An *unknown* sub-action is an error (exit 1); a bare subcommand prints its
-    # help and exits 0 (handled by the `when nil` arms). Mirrors portless's
-    # `exit(help || !args[1] ? 0 : 1)`.
-    def invalid_action!(usage)
-      warn error_line("usage: rb-portless #{usage}")
-      exit 1
+    # ── trust ─────────────────────────────────────────────────────────────
+    def self.handle_trust(args = [ "trust" ])
+      Args.parse_command_args("trust", args[1..] || [], {}, 0)
+      state = CLI.discover_state
+      dir = state.dir
+      State.ensure_safe_dir(dir) unless File.exist?(dir)
+      if (unsafe = State.explain_unsafe(dir))
+        warn Colors.red("Cannot trust the CA in #{dir}: #{unsafe}", io: $stderr)
+        raise Exit, 1
+      end
+      result = Certs.ensure_certs(dir)
+      if result.is_a?(Hash) && result[:ca_generated]
+        warn Colors.gray("Generated local CA certificate.", io: $stderr)
+        if Health.proxy_running?(state.port)
+          port_flag = state.port == (state.tls ? 443 : 80) ? "" : " -p #{state.port}"
+          warn Colors.yellow("The running proxy still serves certificates from the previous CA.", io: $stderr)
+          warn "Restart it: rb-portless proxy stop#{port_flag} && rb-portless proxy start#{port_flag}"
+        end
+      end
+      trust = Trust.trust_ca(dir)
+      if trust[:trusted]
+        warn "Local CA added to system trust store."
+        warn Colors.gray("Browsers will now trust rb-portless HTTPS certificates.", io: $stderr)
+        return 0
+      end
+      error = trust[:error].to_s
+      if (error.include?("Permission denied") || error.include?("EACCES")) && !Privilege.root?
+        warn Colors.yellow("Trusting the CA requires elevated privileges. Requesting sudo...", io: $stderr)
+        ENV["PORTLESS_STATE_DIR"] = dir # forwarded by the sudo re-exec (PORTLESS_* env)
+        return 0 if Privilege.reexec_with_sudo([ "trust" ])
+
+        warn Colors.red("sudo elevation also failed.", io: $stderr)
+      end
+      warn Colors.red("Failed to trust CA: #{error}", io: $stderr)
+      raise Exit, 1
     end
 
-    # ── Output (colour no-ops when not a TTY / NO_COLOR) ──────────────────
-    def ok(msg)   = puts Colors.green("rb-portless: #{msg}")
-    def info(msg) = puts "rb-portless: #{msg}"
-    def error_line(msg) = Colors.red("rb-portless: #{msg}", io: $stderr)
-
-    # ── Flag helpers ──────────────────────────────────────────────────────
-    def tls_flag(args)
-      return false if args.include?("--no-tls")
-
-      true
+    # ── prune / clean shared helpers ──────────────────────────────────────
+    # {pgid => ProcessGroup::Stop}; routes sharing a group share one outcome.
+    def self.stop_recorded_groups(routes, signal)
+      groups = routes.reject { |r| r.child_pgid.nil? }.group_by(&:child_pgid)
+      groups.to_h do |pgid, group|
+        members = group.filter_map { |r| r.orphan_pid && { pid: r.orphan_pid, start_time: r.orphan_start_time } }
+        [ pgid, ProcessGroup.stop_process_group(pgid, group.map(&:child_start_time), members, signal,
+                                                port: group.first.port) ]
+      end
     end
 
-    # nil unless the user passed --tls/--no-tls — restart preserves the running
-    # daemon's mode by default.
-    def explicit_tls_flag(args)
-      return false if args.include?("--no-tls")
-      return true if args.include?("--tls")
+    def handle_prune(args)
+      force = Args.parse_command_args("prune", args[1..], { "--force" => :boolean }, 0).has?("--force")
+      state = CLI.discover_state
+      store = new_store(state.dir)
+      if (unsafe = store.untrusted_reason)
+        warn Colors.red("Cannot prune routes recorded in #{state.dir}: #{unsafe}", io: $stderr)
+        warn Colors.blue("Nothing was signaled.", io: $stderr)
+        return 1
+      end
+      stale = store.find_stale_routes
+      if stale.empty?
+        puts "No orphaned routes found."
+        return 0
+      end
+      live_ts_ports = store.load_routes.filter_map(&:tailscale_https_port)
 
-      nil
+      pruned = skipped = 0
+      signal = force ? "KILL" : "TERM"
+      stops = CLI.stop_recorded_groups(stale, signal)
+      stale.each do |route|
+        pgid = route.child_pgid
+        stop = pgid && stops[pgid]
+        if stop&.state == "survived"
+          store.record_stale_orphan(route, stop.survivor[:pid], stop.survivor[:start_time]) if stop.survivor
+          skipped += 1
+          tail = force ? " after SIGKILL; route kept" : "; route kept. Retry with rb-portless prune --force"
+          puts "  #{route.hostname} :#{route.port} - process group #{pgid} did not exit#{tail}"
+          next
+        end
+        if stop&.state == "unverified"
+          holder = ProcessGroup.running?(pgid) ? nil : PortOwner.pids_on_port(route.port).find { |pid| PortOwner.process_group_id(pid) == pgid }
+          start = holder && PortOwner.start_time(holder)
+          recorded = holder && start && store.record_stale_orphan(route, holder, start)
+          skipped += 1
+          puts(recorded ? "  #{route.hostname} :#{route.port} - process group #{pgid} outlived its leader; route kept and " \
+                          "process #{holder} recorded. Retry with rb-portless prune --force"
+                        : "  #{route.hostname} :#{route.port} - process group #{pgid} could not be verified; route kept " \
+                          "and nothing was killed")
+          next
+        end
+        holders = PortOwner.pids_on_port(route.port)
+        held = !holders.empty? || PortOwner.port_listening?(route.port)
+        unless store.remove_stale_route(route.hostname, route.pid)
+          puts "  #{route.hostname} :#{route.port} - route changed or owner is alive; route kept"
+          skipped += 1
+          next
+        end
+        pruned += 1
+        holder = holders.empty? ? "another process" : "PID #{holders.join(', ')}"
+        puts "  #{route.hostname} :#{route.port} - route removed#{held ? "; #{holder} still holds the port and was not killed" : ''}"
+        if route.tailscale_https_port && !live_ts_ports.include?(route.tailscale_https_port)
+          begin
+            Share::Tailscale.unregister_tailscale(https_port: route.tailscale_https_port, funnel: route.tailscale_funnel)
+            puts "  #{route.hostname} - removed tailscale serve on port #{route.tailscale_https_port}"
+          rescue StandardError
+            warn Colors.yellow("  #{route.hostname} - could not remove tailscale serve", io: $stderr)
+          end
+        end
+        Tunnel.stop_recorded(route, verify: true).each { |t| puts "  #{route.hostname} - stopped #{t[:label]} tunnel" }
+      end
+
+      killed = stops.count { |_, s| s.state == "stopped" && s.signaled }
+      stops.each { |pgid, s| puts "  killed process group #{pgid} (SIG#{signal})" if s.state == "stopped" && s.signaled }
+      skipped_summary = skipped.zero? ? "" : ", skipped #{skipped} #{skipped == 1 ? 'route' : 'routes'}"
+      puts Colors.green("\nPruned #{pruned} stale #{pruned == 1 ? 'route' : 'routes'}, killed #{killed} orphaned " \
+                        "#{killed == 1 ? 'process' : 'processes'}#{skipped_summary}.")
+      0
     end
 
-    # nil unless the user passed --lan/--no-lan (restart preserves the mode).
-    def lan_flag(args)
-      return false if args.include?("--no-lan")
-      return true if args.include?("--lan")
+    def handle_clean(args)
+      parsed = Args.parse_command_args("clean", args[1..], { "--yes" => :boolean, "-y" => :boolean }, 0)
+      collected = CleanUtils.collect_state_dirs_for_cleanup_with_failures
+      dirs = collected[:dirs]
+      warn "Clean will:"
+      warn "  Stop the proxy"
+      warn "  Remove the startup service if installed"
+      warn "  Remove the CA from the trust store"
+      warn "  Delete known state files in: #{dirs.empty? ? 'no existing state directories' : dirs.join(', ')}"
+      warn "  Remove the rb-portless block from #{Hosts.file}"
+      collected[:failures].each do |failed|
+        warn Colors.yellow("  Leave #{failed} alone: #{State.explain_unsafe(failed) || 'it cannot be resolved'}", io: $stderr)
+      end
 
-      nil
+      unless parsed.has?("--yes") || parsed.has?("-y")
+        if !$stdin.tty? || !$stderr.tty? || ENV["CI"]
+          raise UsageError.new("Confirmation required.", [ "Re-run: rb-portless clean --yes" ])
+        end
+
+        $stderr.print "Continue? [y/N] "
+        answer = $stdin.gets.to_s.strip
+        unless %w[y yes].include?(answer)
+          warn "Clean canceled."
+          return 1
+        end
+      end
+
+      problems = collected[:failures].length
+      service = Service.try_uninstall
+      if service[:removed]
+        puts Colors.green("Removed startup service.")
+      elsif service[:needs_elevation] && !Privilege.root?
+        unless Privilege.reexec_with_sudo(Service.uninstall_sudo_args)
+          warn Colors.red("Failed to remove startup service with sudo.", io: $stderr)
+          return 1
+        end
+      elsif service[:error]
+        message = "Could not remove startup service: #{service[:error]}"
+        if service[:installed]
+          warn Colors.red(message, io: $stderr)
+          return 1
+        end
+        warn Colors.yellow(message, io: $stderr)
+        problems += 1
+      end
+
+      puts "Stopping proxy if it is running..."
+      state = CLI.discover_state
+      store = new_store(state.dir)
+      proxy_stopped = Daemon.stop(port: state.port) != false
+      if proxy_stopped && Health.proxy_running?(state.port)
+        warn Colors.red("Proxy is still running on port #{state.port}. Stop it and retry clean.", io: $stderr)
+        proxy_stopped = false
+      end
+      problems += 1 unless proxy_stopped
+
+      routes = begin
+        store.untrusted_reason ? [] : store.load_routes_raw
+      rescue StandardError => e
+        warn Colors.yellow("Could not read routes for tunnel cleanup: #{e.message}", io: $stderr)
+        problems += 1
+        []
+      end
+      routes.each do |route|
+        if route.tailscale_https_port
+          begin
+            Share::Tailscale.unregister_tailscale(https_port: route.tailscale_https_port, funnel: route.tailscale_funnel)
+            puts Colors.green("Removed tailscale serve on port #{route.tailscale_https_port}.")
+          rescue StandardError => e
+            warn Colors.yellow(e.message, io: $stderr)
+            problems += 1
+          end
+        end
+        Tunnel.stop_recorded(route, verify: true).each do |t|
+          puts Colors.green("Stopped #{t[:label]} tunnel for #{route.hostname}.")
+        end
+      end
+
+      warn Colors.yellow("Kept the CA in the trust store while proxy stop is unconfirmed.", io: $stderr) unless proxy_stopped
+      outcome = CleanUtils.run_cleanup_steps(proxy_stopped ? CleanUtils::CLEANUP_STEP_ORDER : %w[files hosts], dirs,
+                                             !proxy_stopped)
+      outcome[:ca_results].each do |dir, result|
+        if outcome[:failed_ca_state_dirs].include?(dir)
+          problems += 1
+          warn Colors.yellow("Could not remove CA from trust store: #{result[:error] || 'unknown error'}\n" \
+                             "Delete the certificate manually, then rerun clean.", io: $stderr)
+        else
+          puts Colors.green("Removed local CA from the system trust store.")
+        end
+      end
+      outcome[:state_failures].each { |f| warn Colors.yellow("Could not remove state file: #{f}", io: $stderr) }
+      problems += outcome[:state_failures].length
+      puts Colors.green("Removed rb-portless state files from known state directories.") if outcome[:state_failures].empty?
+      unless outcome[:failed_ca_state_dirs].empty?
+        warn Colors.yellow("Retained CA identity files so trust removal can be retried safely.", io: $stderr)
+      end
+      if outcome[:hosts_cleaned]
+        puts Colors.green("Removed rb-portless entries from #{Hosts.file}.")
+      else
+        warn Colors.yellow("Could not remove rb-portless entries from #{Hosts.file}.", io: $stderr)
+        problems += 1
+      end
+
+      if problems.positive?
+        warn "Clean finished with #{problems} problem(s)."
+        return 1
+      end
+      puts Colors.green("Clean finished.")
+      0
     end
 
-    def int_flag(args, name)
-      i = args.index(name)
-      i ? Integer(args[i + 1], exception: false) : nil
+    # ── doctor ────────────────────────────────────────────────────────────
+    def handle_doctor(args)
+      json = Args.parse_command_args("doctor", args[1..], { "--json" => :boolean }, 0).has?("--json")
+      Doctor.new(json: json).run
     end
-
-    # Parse + validate a port in 1–65535, with a clean error (never a backtrace).
-    def parse_port!(value, label)
-      port = Integer(value.to_s, exception: false)
-      raise Error, "invalid #{label} #{value.inspect} — must be 1-65535" unless port&.between?(1, 65_535)
-
-      port
-    end
-
-    def rest(command)
-      @argv.first == command ? @argv[1..] : @argv
-    end
-
-    def flag?(*names) = @argv.any? { |a| names.include?(a) }
 
     def print_version
-      puts "rb-portless #{Portless::VERSION}"
-    end
-
-    def print_help
-      puts <<~HELP
-        #{Colors.bold("rb-portless #{Portless::VERSION}")} — named .localhost URLs for local dev
-
-        #{Colors.blue('Usage:')}
-          rb-portless run <command>        run a dev server through the proxy
-          rb-portless run                  run the `apps` map, or the dev script
-          rb-portless <name> <command>     run <command> at https://<name>.localhost
-          rb-portless get <name>           print a service's URL (--no-worktree)
-          rb-portless alias <name> <port>  static route for an unmanaged service
-          rb-portless proxy start|stop|restart  manage the proxy daemon
-          rb-portless trust                trust the local CA (HTTPS)
-          rb-portless hosts sync|clean     manage /etc/hosts (Safari fallback)
-          rb-portless list                 show active routes
-          rb-portless doctor               diagnose setup
-          rb-portless clean | prune        tear down / reap orphans (--force kills)
-          rb-portless service install      bind the privileged port at boot
-
-        #{Colors.blue('run flags:')}
-          --name <name>                    override the inferred hostname
-          --app-port <n>                   fix the backend port (else auto)
-          --force                          take over a route owned by another run
-          --lan [--ip <addr>]              also serve on the LAN (<name>.local)
-          --ngrok                          share publicly via ngrok
-          --tailscale | --funnel           share via your tailnet / Funnel
-
-        In a linked git worktree on a non-default branch, the branch name is
-        prepended as a subdomain (auth.<name>.localhost). PORTLESS=0 runs the
-        command directly without the proxy.
-
-        HTTPS is the default (https://<name>.localhost). Config: portless.json.
-      HELP
-    end
-
-    # Per-command help (`rb-portless <cmd> --help`, or a bare subcommand). Kept
-    # as plain data so the renderer can colourise it for the terminal.
-    HELP = {
-      "run"     => { summary: "Run a dev server through the proxy.",
-                     usage: [ "run <command>", "run   (the apps map, or bin/dev / bin/rails server)" ],
-                     flags: [ [ "--name <name>", "override the inferred hostname" ],
-                              [ "--app-port <n>", "fix the backend port (else auto)" ],
-                              [ "--force", "take over a route held by another run" ],
-                              [ "--lan [--ip <addr>]", "also serve on the LAN" ],
-                              [ "--ngrok | --tailscale | --funnel", "share publicly" ] ],
-                     example: "rb-portless run bin/dev" },
-      "get"     => { summary: "Print a service's URL (for scripts / env vars).",
-                     usage: [ "get <name> [--no-worktree]" ],
-                     flags: [ [ "--no-worktree", "skip the git-worktree subdomain prefix" ] ],
-                     example: "DB_URL=$(rb-portless get db)" },
-      "alias"   => { summary: "Static route for a service portless doesn't manage.",
-                     usage: [ "alias <name> <port> [--force]", "alias --remove <name>" ],
-                     flags: [ [ "--force", "overwrite an existing route" ] ],
-                     example: "rb-portless alias postgres 5432   # -> https://postgres.localhost" },
-      "proxy"   => { summary: "Manage the proxy daemon.",
-                     usage: [ "proxy start [--no-tls] [--port <n>] [--lan]", "proxy stop",
-                              "proxy restart [--lan | --no-lan]   (also picks up an updated gem)" ],
-                     flags: [ [ "--lan", "listen on all interfaces (default: loopback only)" ],
-                              [ "--no-lan", "go back to loopback-only" ] ],
-                     example: "rb-portless proxy restart --no-lan   # stop serving the LAN" },
-      "trust"   => { summary: "Trust the local CA so HTTPS works without warnings.",
-                     usage: [ "trust" ] },
-      "hosts"   => { summary: "Manage the /etc/hosts block (Safari / non-.localhost TLDs).",
-                     usage: [ "hosts sync", "hosts clean" ] },
-      "list"    => { summary: "Show active routes.", usage: [ "list" ] },
-      "doctor"  => { summary: "Diagnose the setup (read-only).", usage: [ "doctor" ] },
-      "clean"   => { summary: "Remove all state: stop proxy, untrust CA, clear routes & hosts.",
-                     usage: [ "clean" ] },
-      "prune"   => { summary: "Reap routes whose owner died; kill the orphaned dev server.",
-                     usage: [ "prune [--force]" ],
-                     flags: [ [ "--force", "SIGKILL the orphan instead of SIGTERM" ] ] },
-      "service" => { summary: "Install the proxy as an OS startup service (binds 443 at boot).",
-                     usage: [ "service install [--no-tls] [--port <n>]", "service uninstall", "service status" ] }
-    }.freeze
-
-    def command_help(name)
-      h = HELP.fetch(name)
-      out = [ "", "  #{Colors.bold("rb-portless #{name}")} — #{h[:summary]}", "", "  #{Colors.blue('Usage:')}" ]
-      h[:usage].each { |u| out << "    #{Colors.cyan("rb-portless #{u}")}" }
-      if h[:flags]
-        out << "" << "  #{Colors.blue('Flags:')}"
-        h[:flags].each { |flag, desc| out << "    #{Colors.cyan(flag.ljust(34))} #{desc}" }
-      end
-      out << "" << "  #{Colors.dim("Example: #{h[:example]}")}" if h[:example]
-      out << ""
-      puts out.join("\n")
+      puts VERSION
+      0
     end
   end
 end

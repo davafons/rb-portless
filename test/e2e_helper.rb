@@ -49,15 +49,18 @@ module E2E
     nil
   end
 
+  # Upstream defaults to strict routing; e2e covers wildcard fallback too.
+  def extra_flags = %w[--wildcard]
+
   def start_proxy
     port = free_port
     exe = File.expand_path("../exe/rb-portless", __dir__)
     lib = File.expand_path("../lib", __dir__)
     log = File.join(Portless::State.ensure_dir!, "e2e-proxy.log")
     @proxy_pid = Process.spawn(
-      { "PORTLESS_STATE_DIR" => Portless::State.dir },
+      { "PORTLESS_STATE_DIR" => Portless::State.dir, "PORTLESS_SYNC_HOSTS" => "0" },
       RbConfig.ruby, "-I", lib, exe,
-      "proxy", "start", "--foreground", "--port", port.to_s, "--tls",
+      "proxy", "start", "--foreground", "--port", port.to_s, "--skip-trust", *extra_flags,
       out: log, err: log
     )
     deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 15
@@ -143,17 +146,35 @@ module E2E
 
   # Client-side helpers ------------------------------------------------------
 
+  # The daemon polls routes.json (upstream: fs.watch), so a route goes live a
+  # beat after the write. Wait until the proxy stops answering 404 for it.
   def register(hostname, port = backend_port, pid: Process.pid)
-    Portless::RouteStore.new.add(hostname: hostname, port: port, pid: pid, force: true)
+    Portless::RouteStore.new.add_route(hostname: hostname, port: port, pid: pid, force: true)
+    wait_for_route(hostname) { |code| code != "404" }
   end
 
   def deregister(hostname, pid: Process.pid)
-    Portless::RouteStore.new.remove(hostname, owner_pid: pid)
+    Portless::RouteStore.new.remove_route(hostname, owner_pid: pid)
+    wait_for_route(hostname) { |code| code == "404" }
+  end
+
+  def wait_for_route(hostname, timeout: 3)
+    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
+    loop do
+      code = begin
+        get(hostname, "/", verify: false).code
+      rescue StandardError
+        nil
+      end
+      return if yield(code) || Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
+
+      sleep 0.05
+    end
   end
 
   # A real HTTPS GET through the proxy, with full peer + hostname verification
   # against the generated CA — exactly what a browser does after `trust`.
-  def get(host, path = "/", verify: true)
+  def get(host, path = "/", verify: true, accept: nil)
     http = Net::HTTP.new(host, proxy_port)
     http.ipaddr = "127.0.0.1" # SNI/Host keep the hostname; skip OS DNS entirely
     http.use_ssl = true
@@ -161,7 +182,7 @@ module E2E
     http.verify_mode = verify ? OpenSSL::SSL::VERIFY_PEER : OpenSSL::SSL::VERIFY_NONE
     http.open_timeout = 5
     http.read_timeout = 5
-    http.start { |conn| conn.get(path) }
+    http.start { |conn| conn.get(path, accept ? { "accept" => accept } : {}) }
   end
 
   def free_port

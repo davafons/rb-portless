@@ -4,12 +4,11 @@
   <a href="https://rubygems.org/gems/rb-portless"><img src="https://img.shields.io/gem/v/rb-portless" alt="Gem Version"></a>
   <a href="https://github.com/davafons/rb-portless/actions/workflows/ci.yml"><img src="https://github.com/davafons/rb-portless/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://github.com/davafons/rb-portless/blob/main/LICENSE"><img src="https://img.shields.io/github/license/davafons/rb-portless" alt="License"></a>
-  <a href="https://rubygems.org/gems/rb-portless"><img src="https://img.shields.io/gem/dt/rb-portless" alt="Downloads"></a>
 </p>
 
 <p align="center">
-  Stable, named <code>.localhost</code> URLs for local development —<br>
-  a native-Ruby port of <a href="https://github.com/vercel-labs/portless">Vercel's portless</a>.
+  Replace port numbers with stable, named <code>.localhost</code> URLs for local development.<br>
+  A native-Ruby port of <a href="https://github.com/vercel-labs/portless">Vercel's portless</a>, kept at feature parity.
 </p>
 
 ```diff
@@ -17,10 +16,25 @@
 + rb-portless run bin/rails server     # https://myapp.localhost
 ```
 
-Run your dev server through a tiny local reverse proxy and reach it at
-`https://<name>.localhost` instead of juggling ports. HTTPS by default (a local
-CA + per-host certs), a random backend port so you never collide on 3000/3001,
-and wildcard subdomains (`*.myapp.localhost`) so multi-tenant apps Just Work.
+rb-portless runs a local reverse proxy and gives each dev server a name. Your app
+listens on a free port that rb-portless assigns, and you open `https://<name>.localhost`
+instead of remembering which port it took. The URL stays the same across restarts, so
+bookmarks, cookies, OAuth redirects, and an agent's test script keep pointing at the
+right app.
+
+rb-portless behaves like upstream portless: same commands, flags, environment variables,
+`portless.json` and `package.json` configuration, routing, and output. The
+[portless.sh](https://portless.sh) documentation applies — read `portless` as
+`rb-portless` in commands. The only differences are names, so both tools can be
+installed side by side:
+
+| | portless | rb-portless |
+| --- | --- | --- |
+| Executable | `portless` | `rb-portless` |
+| State directory | `~/.portless` | `~/.rb-portless` (`PORTLESS_STATE_DIR` overrides) |
+| `/etc/hosts` block | `# portless-start` | `# rb-portless-start` |
+| Boot service | `sh.portless.proxy` | `rb.portless.proxy` / `rb-portless.service` |
+| Child CA env | `NODE_EXTRA_CA_CERTS` | also `SSL_CERT_FILE` (a bundle of system roots + the local CA), so Ruby clients trust `.localhost` HTTPS |
 
 ## Install
 
@@ -28,240 +42,104 @@ and wildcard subdomains (`*.myapp.localhost`) so multi-tenant apps Just Work.
 gem install rb-portless
 ```
 
-- Ruby >= 3.2. macOS or Linux. (Windows: HTTP works; CA trust + boot service are
-  on the roadmap.)
+Ruby 3.2 or later, on macOS or Linux.
 
-## Use
-
-```bash
-rb-portless run bin/dev            # -> https://<project>.localhost
-rb-portless run bin/rails server   # anything that respects $PORT
-rb-portless run -- npm run dev     # Vite/Astro/etc. get --port injected
-```
-
-A random port (4000–4999) is injected as `PORT` (and `HOST=127.0.0.1`);
-Rails/puma respect it natively. The proxy **auto-starts** on first run: it
-generates a local CA, **trusts it** (one keychain/sudo prompt, like portless),
-and binds 443 — another one-time `sudo` on macOS/Linux (falls back to `:1355` if
-you decline). After that, HTTPS just works with no browser warnings.
+## Quick start
 
 ```bash
-rb-portless trust                  # re-trust manually if ever needed
-rb-portless service install        # bind 443 at boot — never prompt for sudo again
+rb-portless myapp bin/rails server
+# -> https://myapp.localhost
+
+rb-portless run bin/dev
+# -> https://<project>.localhost
 ```
 
-### Config (`portless.json`)
+From a project with a `"dev"` script in `package.json`, a bare `rb-portless` runs that
+script through the detected package manager. Pass arguments to the script after `--`.
 
-```json
-{ "name": "shirabe", "tld": "shirabe.org.localhost" }
-```
+The name comes from `package.json`, the git root, or the directory.
 
-| Key       | Default     | Meaning |
-| --------- | ----------- | ------- |
-| `name`    | dir/git root | the subdomain label |
-| `tld`     | `localhost` | base host; a multi-label value like `shirabe.org.localhost` gives every `*.shirabe.org.localhost` subdomain, all routed to the one app |
-| `tls`     | `true`      | HTTPS (`false` = plain HTTP on :80) |
-| `appPort` | random      | pin the backend port |
-
-With a custom `tld`, every `*.shirabe.org.localhost` subdomain wildcard-routes to
-the one app — ideal for subdomain-per-tenant apps.
-
-## Multiple apps, LAN & sharing
-
-**Monorepo / multi-app** — define an `apps` map and `rb-portless run` (no command)
-starts them all, each at its own name:
-
-```jsonc
-// portless.json
-{ "apps": { "web": "bin/rails server", "api": "node api/server.js" } }
-// → https://web.localhost, https://api.localhost
-```
-
-**LAN mode** — reach the app from your phone on the same Wi-Fi. It detects the
-LAN IP, registers `<name>.local`, publishes it over mDNS, and switches the
-proxy (loopback-only by default, for safety) to listen on the network:
-
-```bash
-rb-portless run --lan bin/dev      # also → https://<name>.local
-rb-portless run --lan --ip 10.0.0.5 bin/dev   # override the detected IP
-rb-portless proxy restart --no-lan            # stop serving the LAN
-```
-
-**`--lan` shares that one app.** There's a single proxy for every project, so
-LAN mode opens one socket for all of them — but only routes started with
-`--lan` answer clients from the network. Everything else you have running stays
-loopback-only and 404s (without naming your other apps). The daemon stays in LAN
-mode until `proxy restart --no-lan`.
-
-> Devices won't trust your local CA without installing it — use `--lan` with
-> `--no-tls` (set `"tls": false`) for plain HTTP, or install `~/.rb-portless/ca.pem`
-> on the device. mDNS publishes only `<name>.local`, so tenant subdomains
-> (`kobe.<name>.local`) won't resolve on the device.
-
-**Public sharing** (experimental) — expose the app via ngrok or your tailnet:
-
-```bash
-rb-portless run --ngrok bin/dev        # https://xxxx.ngrok.app
-rb-portless run --tailscale bin/dev    # your-machine.tailnet.ts.net
-rb-portless run --funnel bin/dev       # tailscale Funnel (public)
-```
-
-These use the tools' own CLIs — **install them separately** (we don't bundle
-anything, same as portless), and each degrades gracefully if the tool is absent:
-- **ngrok** — install the `ngrok` CLI and configure an authtoken (free account).
-- **tailscale** — install `tailscale`, be logged into a tailnet, and enable HTTPS
-  certificates (and Funnel, for `--funnel`) in your tailnet settings.
-
-> **Your tailnet config is safe.** rb-portless reads `tailscale serve status`,
-> picks a **free** HTTPS port (never one you're already serving on), registers
-> with `--yes`, and on exit turns off **only the port it created** — it never
-> touches your existing `serve`/`funnel` setup.
-
-## Commands
-
-| Command | Does |
-| --- | --- |
-| `run <cmd>` | run a dev server through the proxy |
-| `<name> <cmd>` | shorthand for `run --name <name> <cmd>` |
-| `proxy start \| stop \| restart` | manage the proxy daemon (`restart` picks up an updated gem) |
-| `trust` | install the local CA into the OS trust store |
-| `service install \| uninstall \| status` | bind the privileged port at boot (launchd/systemd) |
-| `alias <name> <port> [--force]` | a static route (Docker, Postgres, …); `--remove` to drop it |
-| `get <name> [--no-worktree]` | print a name's URL (for `$(rb-portless get api)`) |
-| `list` | show active routes (with any tailscale/ngrok URLs) |
-| `hosts sync \| clean` | manage `/etc/hosts` (Safari / non-`.localhost` TLDs) |
-| `doctor` | diagnose setup |
-| `prune [--force]` | reap stale routes and kill the orphaned dev server (`--force` = SIGKILL) |
-| `clean` | stop the proxy, untrust the CA, remove all state |
-
-Every subcommand takes `--help`. `rb-portless <cmd> --help` prints command-specific
-help.
-
-### Run flags
-
-| Flag | Does |
-| --- | --- |
-| `--name <name>` | override the inferred hostname |
-| `--app-port <n>` | pin the backend port (else a random 4000–4999) |
-| `--force` | take over a route already held by another `run` |
-| `--lan [--ip <addr>]` | also serve on the LAN as `<name>.local` (mDNS) |
-| `--ngrok` / `--tailscale` / `--funnel` | share publicly |
-
-In a **git worktree** linked off a non-default branch, the branch name is prepended
-as a subdomain — `feature/auth` → `https://auth.<name>.localhost` — so every worktree
-gets a distinct URL. Pass `--no-worktree` (on `get`) to skip it. Set **`PORTLESS=0`**
-(`false`/`skip`) to run the command directly without the proxy.
-
-Every run flag has an env equivalent for scripts/CI: `PORTLESS_LAN`,
-`PORTLESS_NGROK`, `PORTLESS_TAILSCALE`, `PORTLESS_FUNNEL` (set to `1`),
-`PORTLESS_APP_PORT`, plus `PORTLESS_HTTPS=0|1` and `PORTLESS_TLD` overriding
-`portless.json`, and `PORTLESS_PORT` for the proxy port. Explicit flags win.
-
-## Rails
-
-Rails is first-class: it respects `PORT` and trusts the loopback proxy, so
-`X-Forwarded-Host/Proto/Port` flow through and `request.host`, subdomains, and
-generated URLs all reflect `https://<name>.localhost`.
-
-**Zero-config setup.** Add the gem to your dev group with the railtie required —
-that's the only project change:
-
-```ruby
-# Gemfile
-group :development do
-  gem "rb-portless", require: "portless/rails"
-end
-```
-
-```jsonc
-// portless.json  (optional — name defaults to the dir/git root)
-{ "name": "myapp", "tld": "myapp.localhost" }
-```
-
-```bash
-rb-portless run bin/dev      # → https://myapp.localhost (CA auto-trusted on first run)
-```
-
-That's it. The railtie **auto-detects when you're running under `rb-portless`**
-(via the `PORTLESS_URL` env the runner injects) and only then whitelists your
-`*.localhost` hosts in development — so Action Dispatch host authorization doesn't
-`403` your named subdomains. Run `bin/dev` normally and nothing is touched.
-
-> **`bin/dev` note:** `rb-portless run bin/dev` wraps Foreman. Foreman passes the
-> injected `PORT` to the **first** process in `Procfile.dev` — keep `web:` first
-> (the Rails default) so the server binds the port the proxy registered.
-
-Prefer not to add the gem? Skip the railtie and allow the host yourself:
-
-```ruby
-# config/environments/development.rb
-config.hosts << /.+\.localhost/
-```
-
-## Use cases
-
-**Kill the port.** Stop memorizing `:3000` / `:3001`. One stable HTTPS URL per
-app, the same every day:
-
-```bash
-rb-portless run bin/dev      # https://myapp.localhost
-```
-
-**Subdomain-per-tenant apps** (the headline). A multi-label `tld` gives every
-subdomain to one app, so multi-tenant / Classroom-style routing works locally
-exactly like production:
-
-```jsonc
-{ "name": "myapp", "tld": "myapp.localhost" }
-// kobe.myapp.localhost, osaka.myapp.localhost, admin.myapp.localhost → your app
-```
-
-**Several services at once.** Give each its own name; route non-portless
-processes (a database, a container) with a static `alias`:
-
-```bash
-rb-portless run bin/dev                 # https://web.localhost
-rb-portless run -- node api/server.js   # https://api.localhost   (in another tab)
-rb-portless alias pg 5432               # https://pg.localhost     (static)
-```
-
-**HTTPS that matches prod.** Develop against real TLS + HTTP/2, so secure-cookie
-and `X-Forwarded-Proto` behaviour is the same locally as in production.
+- The proxy starts on the first run. It serves HTTPS with HTTP/2 on port 443, so the
+  first run creates a local certificate authority, adds it to the system trust store, and
+  may ask for `sudo`. Use `--no-tls` for plain HTTP, or `--unprivileged` to skip `sudo`.
+- `rb-portless run <cmd>` infers the name and detects git worktrees. In a linked worktree,
+  the last `/` segment of the branch becomes a subdomain, so `fix-ui.myapp.localhost` and
+  `myapp.localhost` run side by side. Use `--prefix` or `PORTLESS_PREFIX` to set the
+  label, or the `worktree` setting in `portless.json`.
+- A name with dots is a subdomain: `rb-portless api.myapp bin/rails server` serves
+  `https://api.myapp.localhost`.
+- `PORTLESS=0 bin/dev` runs the command directly, without the proxy.
 
 ## How it works
 
-No daemon protocol — coordination is a state dir (`~/.rb-portless`) with a
-`routes.json` registry (host → backend port). The proxy resolves each request's
-host to a backend and forwards it, minting a per-host TLS leaf cert on the SNI
-callback (because `*.localhost` wildcard certs aren't valid at the reserved-TLD
-boundary). For ports < 1024 it re-execs under `sudo` so the elevated process can
-bind the socket, then hands ownership of state files back to you. See
-[`AGENTS.md`](AGENTS.md) for the full architecture.
+Each app gets a random port from 4000 to 4999 through the `PORT` environment variable
+(Rails and Puma read it), and registers a route from its hostname to that port in
+`routes.json`. The proxy forwards `https://<name>.localhost` to the route. For frameworks
+that ignore `PORT`, such as Vite, Astro, Angular, Expo, and Wrangler, rb-portless adds the
+matching port and host flags to the command.
 
-## Compared to portless (Node)
+Routing is exact by default: an unregistered subdomain gets a 404. Start the proxy with
+`--wildcard` (or `PORTLESS_WILDCARD=1`) to send `tenant.myapp.localhost` to the most
+specific registered parent, `myapp.localhost`.
 
-The mental model is identical — `run` wraps your dev command, the proxy
-auto-starts, named `.localhost` URLs replace ports. The only Ruby-world addition
-is the one-line `require "portless/rails"` to satisfy Rails' host authorization.
+Outside LAN mode, the proxy listens only on `127.0.0.1` and `::1`. It keeps `/etc/hosts`
+in sync for route hostnames, which custom TLDs such as `.test` need.
 
-| | **portless (Node)** | **rb-portless (Ruby/Rails)** |
-|---|---|---|
-| Install | `npm i -g portless` | `gem install rb-portless` (or Gemfile dev group) |
-| Run a server | `portless run next dev` | `rb-portless run bin/rails server` |
-| Run the dev orchestrator | `portless` (runs `"dev"` script) | `rb-portless run bin/dev` (wraps Foreman) |
-| Bake into the project | `"dev": "portless run next dev"` → `npm run dev` | put `rb-portless run` in `bin/dev`, or use the binstub |
-| Name the URL | `portless myapp …` / `portless.json` | `portless.json` `{ "name": "myapp" }` (else dir/git root) |
-| Wildcard tenant subdomains | `tld` config | `portless.json` `{ "tld": "myapp.localhost" }` → `*.myapp.localhost` |
-| Pin the backend port | `--app-port` / `appPort` | `appPort` in `portless.json` |
-| Framework port injection | vite/astro/etc. auto | same (Rails/puma respect `PORT` natively) |
-| HTTPS trust | auto on first run (+ `portless trust`) | auto on first run (+ `rb-portless trust`) |
-| **Host allowlist** | not needed | **`gem "rb-portless", require: "portless/rails"`** (Rails-only) |
-| Privileged 443 bind | sudo re-exec (auto) | sudo re-exec (auto), `:1355` fallback |
-| Bind at boot (no sudo) | `portless service install` | `rb-portless service install` |
-| Inspect / manage | `portless list / doctor / clean` | `rb-portless list / doctor / clean` |
-| Static route (DB, etc.) | `portless alias pg 5432` | `rb-portless alias pg 5432` |
+To reach an app from another device or share it, use LAN mode (`--lan`) for phones on the
+same network — every running app is then reachable on that network, published over mDNS
+as `<name>.local` — or share one app with `--tailscale`, `--funnel`, `--ngrok`, or
+`--cloudflare`.
 
-## Contributing
+## Configuration
+
+An optional `portless.json` sets the name and script. In a monorepo, one file at the root
+covers every workspace package:
+
+```json
+{
+  "apps": {
+    "apps/web": { "name": "myapp" },
+    "apps/api": { "name": "api.myapp" }
+  }
+}
+```
+
+A `"portless"` key in `package.json` works too. Flags override `PORTLESS_*` variables,
+which override `portless.json`. See [Configuration](https://portless.sh/configuration).
+
+## For AI agents
+
+`rb-portless mcp` starts an MCP server over stdio. The default `core` profile lists
+routes, looks up URLs, and manages static aliases. `--tools all` adds proxy control and
+diagnostics:
+
+```json
+{ "mcpServers": { "rb-portless": { "command": "rb-portless", "args": ["mcp"] } } }
+```
+
+## Commands
+
+Run `rb-portless --help` for the command list, `rb-portless proxy --help` for proxy
+options, or `rb-portless <command> --help` for details. Usage errors exit with code `2`;
+other failures exit with `1`. Use `rb-portless list --json` or `rb-portless get <name> --json`
+for JSON output.
+
+| Group | Commands |
+| --- | --- |
+| Run apps | `rb-portless`, `run`, `<name> <cmd>`, `get` |
+| Static routes | `alias`, `compose up`, `compose down` |
+| Proxy | `proxy start`, `proxy stop`, `service install`, `service status`, `service uninstall` |
+| HTTPS and DNS | `trust`, `hosts sync`, `hosts clean` |
+| Inspect and clean up | `list`, `doctor`, `prune`, `clean` |
+| Agents | `mcp` |
+
+## Platforms
+
+macOS and Linux. Windows CA trust and the Windows boot service are not ported.
+`--tailscale` and `--funnel` need the Tailscale CLI, `--ngrok` needs the ngrok CLI,
+`--cloudflare` needs `cloudflared`, and `compose` needs Docker Compose.
+
+## Development
 
 ```bash
 bundle install
@@ -269,6 +147,10 @@ bundle exec rake test
 bundle exec rubocop
 ```
 
+Upstream is cloned into `references/portless` (gitignored) for diffing and differential
+tests. [AGENTS.md](AGENTS.md) maps each Ruby file to its upstream source.
+
 ## License
 
-MIT.
+MIT. Ports code from [vercel-labs/portless](https://github.com/vercel-labs/portless)
+(Apache-2.0).

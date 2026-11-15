@@ -24,24 +24,30 @@ class HealthTest < Minitest::Test
     thread&.kill
   end
 
+  def test_recognises_only_x_portless_1
+    assert Portless::Health.marker?("HTTP/1.1 404 Not Found\r\nX-Portless: 1\r\n\r\n")
+    refute Portless::Health.marker?("HTTP/1.1 404 Not Found\r\nx-portless: 0.4.0\r\n\r\n")
+    refute Portless::Health.marker?("HTTP/1.1 200 OK\r\nserver: nginx\r\n\r\n")
+    refute Portless::Health.marker?(nil)
+  end
+
+  def test_plain_probe_against_a_fake_portless_server
+    server = TCPServer.new("127.0.0.1", 0)
+    thread = Thread.new do
+      client = server.accept
+      client.readpartial(1024)
+      client.write("HTTP/1.1 404 Not Found\r\nX-Portless: 1\r\nContent-Length: 0\r\n\r\n")
+      client.close
+    end
+    assert Portless::Health.proxy_running?(server.addr[1], tls: false)
+  ensure
+    server&.close
+    thread&.kill
+  end
+
   def test_discover_port_returns_a_port_or_nil
-    # No live proxy in tests → nil (or a probed port if one happens to answer).
     result = Portless::Health.discover_port
     assert(result.nil? || result.is_a?(Integer))
-  end
-
-  def test_version_from_reads_the_stamped_version
-    assert_equal "0.4.0", Portless::Health.version_from("HTTP/1.1 404 Not Found\r\nx-rb-portless: 0.4.0\r\n\r\n")
-  end
-
-  # Pre-0.4 proxies stamped a bare "1" — must read as older than any release.
-  def test_version_from_treats_the_legacy_marker_as_ancient
-    assert_equal "0.0.0", Portless::Health.version_from("HTTP/1.1 404 Not Found\r\nx-rb-portless: 1\r\n\r\n")
-  end
-
-  def test_version_from_is_nil_without_the_header
-    assert_nil Portless::Health.version_from("HTTP/1.1 200 OK\r\nserver: nginx\r\n\r\n")
-    assert_nil Portless::Health.version_from(nil)
   end
 
   def free_port

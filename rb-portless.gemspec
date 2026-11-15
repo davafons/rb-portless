@@ -13,8 +13,7 @@ Gem::Specification.new do |spec|
     A native-Ruby port of Vercel's portless. Run your dev server through a local
     reverse proxy and reach it at https://<name>.localhost instead of a port —
     HTTPS by default, with an on-demand local CA, per-host certs, and a random
-    backend port so you never collide on 3000/3001 again. Framework-agnostic;
-    first-class with Rails.
+    backend port so you never collide on 3000/3001 again. Framework-agnostic.
   DESC
   spec.homepage = "https://github.com/davafons/rb-portless"
   spec.license = "MIT"

@@ -1,43 +1,41 @@
 # frozen_string_literal: true
 
-module Portless
-  # Shared bits of the two run paths (single-app Runner + multi-app Multi):
-  # the child env, the display URL, and first-run CA trust. Both expect a
-  # `@config`.
-  module RunSupport
-    private
+require "rbconfig"
 
-    def child_env(port, url)
-      base = {
-        "PORT" => port.to_s,
-        "HOST" => "127.0.0.1",
-        "PORTLESS_URL" => url,
-        # Under --lan, let the app (the Rails railtie) whitelist <name>.local
-        # too — it's not covered by any host-authorization default.
-        "PORTLESS_LAN_HOST" => @lan_host,
-        # Public tunnel URLs (when sharing): tailscale forwards with the raw
-        # *.ts.net Host, so the app must whitelist it — and apps can
-        # self-reference their public address (mirrors portless).
-        "PORTLESS_TAILSCALE_URL" => @tailscale&.dig(:url),
-        "PORTLESS_NGROK_URL" => @ngrok&.dig(:url),
-        # Let the app's own server-side TLS verification trust our CA — via a
-        # bundle that *also* carries the public roots, so SSL_CERT_FILE replacing
-        # the trust store doesn't break the app's outbound HTTPS. See CaBundle.
-        "SSL_CERT_FILE" => CaBundle.path,
-        # Node ignores SSL_CERT_FILE; NODE_EXTRA_CA_CERTS *adds* to its default
-        # roots, so the bare CA is enough (mirrors portless). Respect an
-        # existing value — additions can only live in one file.
-        "NODE_EXTRA_CA_CERTS" => ENV["NODE_EXTRA_CA_CERTS"] ||
-          (State.ca_cert if File.exist?(State.ca_cert))
-      }.compact
-      # Our own bundle (rb-portless is loaded via the app's Bundler binstub) must
-      # not leak into the dev command — a foreman-style `bin/dev` isn't in the
-      # app Gemfile and each Procfile process re-enters Bundler via its binstub.
-      unbundled_overrides.merge(base)
+module Portless
+  # Spawning the child command: /bin/sh -c with shell-escaped args (so shims
+  # and scripts resolve, and a missing command is the shell's 127, not a Ruby
+  # exception), node_modules/.bin prepended to PATH, its own process group,
+  # INT/TERM/HUP forwarded to the tree with a 5s grace → TERM and 10s → KILL.
+  # Mirrors portless's spawnCommand/augmentedPath.
+  module RunSupport
+    module_function
+
+    COMMAND_SHUTDOWN_GRACE = 5.0
+    COMMAND_SHUTDOWN_FORCE = 10.0
+    POLL = 0.05
+    FORWARDED_SIGNALS = %w[INT TERM HUP].freeze
+
+    def shell_escape(arg) = "'#{arg.gsub("'", "'\\\\''")}'"
+
+    def collect_bin_paths(cwd)
+      dirs = []
+      Auto.each_ancestor(cwd) do |dir|
+        bin = File.join(dir, "node_modules", ".bin")
+        dirs << bin if File.exist?(bin)
+      end
+      dirs
     end
 
-    # ENV deltas that undo Bundler for the child (a nil value unsets the key).
-    # Empty when we're not running under Bundler at all.
+    # PATH with node_modules/.bin dirs first and the running interpreter's
+    # bin dir last (upstream appends node's dir).
+    def augmented_path(env = ENV, cwd = Dir.pwd)
+      base = env["PATH"] || env["Path"] || ""
+      [ *collect_bin_paths(cwd), base, File.dirname(RbConfig.ruby) ].reject(&:empty?).join(File::PATH_SEPARATOR)
+    end
+
+    # ENV deltas that undo Bundler for the child (nil unsets). Plumbing: our
+    # own bundle must not leak into the dev command.
     def unbundled_overrides
       return {} unless defined?(Bundler) && Bundler.respond_to?(:unbundled_env)
 
@@ -49,28 +47,104 @@ module Portless
       {}
     end
 
-    def display_url(hostname, proxy_port)
-      scheme = @config.tls ? "https" : "http"
-      default = @config.tls ? Constants::HTTPS_PORT : Constants::HTTP_PORT
-      suffix = proxy_port && proxy_port != default ? ":#{proxy_port}" : ""
-      "#{scheme}://#{hostname}#{suffix}"
-    end
+    # Runs the command and returns the exit code the CLI should exit with.
+    # env: overrides merged over ENV (nil unsets). Callbacks: on_spawn(pid),
+    # on_exit(pid, code) (only on a natural exit), on_cleanup.
+    def spawn_command(command_args, env: {}, on_spawn: nil, on_exit: nil, on_cleanup: nil, cwd: nil)
+      child_env = unbundled_overrides.merge(env)
+      merged_path_source = ENV.to_h.merge(child_env.compact)
+      child_env["PATH"] = augmented_path(merged_path_source, cwd || Dir.pwd)
 
-    # Trust the local CA on first run (HTTPS only, interactive; never blocks the
-    # run), so HTTPS works without browser warnings — like portless.
-    def ensure_trusted
-      return unless @config.tls
-      return if Trust.trusted?
-
-      unless Privilege.interactive?
-        warn "rb-portless: CA not trusted — run `rb-portless trust` (HTTPS shows warnings until then)"
-        return
+      reader, writer = IO.pipe
+      previous = {}
+      FORWARDED_SIGNALS.each do |sig|
+        previous[sig] = trap(sig) do
+          writer.write_nonblock(sig[0])
+        rescue StandardError
+          nil
+        end
       end
 
-      warn "rb-portless: trusting the local CA (first run)…"
-      Trust.install!
-    rescue Portless::Error => e
-      warn "rb-portless: couldn't auto-trust the CA (#{e.message}) — run `rb-portless trust`"
+      script = command_args.map { |a| shell_escape(a) }.join(" ")
+      spawn_opts = { pgroup: true }
+      spawn_opts[:chdir] = cwd if cwd
+      pid = Process.spawn(child_env, "/bin/sh", "-c", script, **spawn_opts)
+      on_spawn&.call(pid)
+      waiter = Thread.new { Process.wait2(pid).last }
+      supervise(pid, waiter, reader, on_exit)
+    ensure
+      FORWARDED_SIGNALS.each { |sig| trap(sig, previous[sig] || "DEFAULT") } unless previous.nil?
+      reader&.close
+      writer&.close
+      on_cleanup&.call
+    end
+
+    SIGNAL_NAMES = { "I" => "INT", "T" => "TERM", "H" => "HUP" }.freeze
+
+    def supervise(pid, waiter, reader, on_exit)
+      tracked = {}
+      shutdown = nil
+      started = nil
+      grace_sent = force_sent = false
+      loop do
+        ready = IO.select([ reader ], nil, nil, POLL)
+        if ready
+          reader.read_nonblock(64, exception: false).to_s.each_char do |c|
+            sig = SIGNAL_NAMES[c] or next
+            ProcessGroup.track_process_tree(pid, tracked)
+            if shutdown
+              ProcessGroup.signal_tracked(tracked, sig)
+            else
+              shutdown = sig
+              started = ProcessGroup.monotonic
+              kill_tree(pid, sig)
+            end
+          end
+        end
+
+        if shutdown
+          elapsed = ProcessGroup.monotonic - started
+          if !grace_sent && elapsed >= COMMAND_SHUTDOWN_GRACE
+            grace_sent = true
+            ProcessGroup.track_process_tree(pid, tracked)
+            ProcessGroup.signal_tracked(tracked, "TERM")
+          end
+          if !force_sent && elapsed >= COMMAND_SHUTDOWN_FORCE
+            force_sent = true
+            ProcessGroup.track_process_tree(pid, tracked)
+            ProcessGroup.signal_tracked(tracked, "KILL")
+          end
+          if !waiter.alive? && !ProcessGroup.any_running?(tracked.reject { |p, _| p == pid })
+            return 128 + (ProcessGroup::SIGNAL_CODES[shutdown] || 15)
+          end
+          next
+        end
+
+        next if waiter.alive?
+
+        status = waiter.value
+        if status.signaled?
+          name = Signal.signame(status.termsig)
+          return 128 + (ProcessGroup::SIGNAL_CODES[name] || 15)
+        end
+        code = status.exitstatus
+        begin
+          on_exit&.call(pid, code)
+        rescue StandardError
+          nil
+        end
+        return code || 1
+      end
+    end
+
+    def kill_tree(pid, signal)
+      Process.kill(signal, -pid)
+    rescue StandardError
+      begin
+        Process.kill(signal, pid)
+      rescue StandardError
+        nil
+      end
     end
   end
 end

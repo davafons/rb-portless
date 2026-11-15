@@ -20,7 +20,7 @@ class E2EProxyTest < Minitest::Test
     res = E2E.get(HOST, "/hello?x=1")
 
     assert_equal "200", res.code
-    assert_equal Portless::VERSION, res[Portless::Constants::HEALTH_HEADER]
+    assert_equal "1", res[Portless::Constants::HEALTH_HEADER]
 
     echo = JSON.parse(res.body)
     assert_equal "GET", echo["method"]
@@ -52,11 +52,11 @@ class E2EProxyTest < Minitest::Test
   end
 
   def test_unknown_host_gets_a_404_listing_the_active_apps
-    res = E2E.get("nobody-home.localhost", "/")
+    res = E2E.get("nobody-home.localhost", "/", accept: "text/html")
     assert_equal "404", res.code
-    assert_equal Portless::VERSION, res[Portless::Constants::HEALTH_HEADER]
+    assert_equal "1", res[Portless::Constants::HEALTH_HEADER]
     assert_includes res.body, HOST # the running app is listed
-    assert_includes res.body, "rb-portless nobody-home" # the command that would fix it
+    assert_includes res.body, "rb-portless nobody-home your-command" # the command that would fix it
   end
 
   def test_request_body_is_forwarded
@@ -102,7 +102,7 @@ class E2EProxyTest < Minitest::Test
     skip "no LAN IPv4 on this machine" unless ip
 
     assert_raises(Errno::ECONNREFUSED, Errno::ETIMEDOUT) do
-      Socket.tcp(ip, E2E.proxy_port, connect_timeout: 2).close
+      TCPSocket.new(ip, E2E.proxy_port, connect_timeout: 2).close
     end
     refute File.exist?(Portless::State.proxy_lan_file), "no LAN marker without --lan"
   end
@@ -143,7 +143,7 @@ class E2EProxyTest < Minitest::Test
     assert_equal "HTTP/2", version
     # Regression: a backend `Connection: close` relayed into the h2 stream used
     # to abort the header block — bare 200, no headers, no body.
-    assert_equal Portless::VERSION, health
+    assert_equal "1", health
     echo = JSON.parse(body)
     assert_equal "/over-h2", echo["path"]
     assert_equal "https", echo["headers"]["x-forwarded-proto"]

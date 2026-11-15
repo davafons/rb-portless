@@ -3,10 +3,20 @@
 # rb-portless — stable, named .localhost URLs for local dev (a native-Ruby port
 # of Vercel's portless). See AGENTS.md for the architecture map.
 require_relative "portless/version"
+
+module Portless
+  class Error < StandardError; end
+end
+
 require_relative "portless/constants"
 require_relative "portless/colors"
 require_relative "portless/state"
-require_relative "portless/worktree"
+require_relative "portless/utils"
+require_relative "portless/args"
+require_relative "portless/commands"
+require_relative "portless/auto"
+require_relative "portless/workspace"
+require_relative "portless/turbo"
 require_relative "portless/config"
 require_relative "portless/free_port"
 require_relative "portless/port_owner"
@@ -21,19 +31,22 @@ require_relative "portless/proxy"
 require_relative "portless/daemon"
 require_relative "portless/service"
 require_relative "portless/frameworks"
-require_relative "portless/banner"
 require_relative "portless/lan_ip"
 require_relative "portless/mdns"
-require_relative "portless/share/ngrok"
+require_relative "portless/hosts_sync_auth"
+require_relative "portless/tunnel"
+require_relative "portless/cloudflare"
 require_relative "portless/share/tailscale"
+require_relative "portless/process_group"
 require_relative "portless/run_support"
 require_relative "portless/runner"
 require_relative "portless/multi"
+require_relative "portless/clean_utils"
+require_relative "portless/doctor"
+require_relative "portless/help"
 require_relative "portless/cli"
 
 module Portless
-  class Error < StandardError; end
-
   # Raised when a privileged action can't run non-interactively (no TTY / CI).
   class NonInteractiveError < Error; end
 

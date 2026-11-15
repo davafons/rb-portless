@@ -1,0 +1,319 @@
+# frozen_string_literal: true
+
+require_relative "fonts"
+
+module Portless
+  # The proxy's styled error pages (404 / 421 / 502 / 508). Ported from upstream
+  # pages.ts; the footer reads "rb-portless" so the two tools stay tellable apart.
+  module Pages
+    module_function
+
+    ARROW_SVG = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M6.5 3.5L11 8l-4.5 4.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+
+    # Route count above which the 404 page offers a hostname filter.
+    FILTER_THRESHOLD = 5
+
+    # Revealed by the filter script; stay hidden when scripting is unavailable.
+    FILTER_CONTROLS = '<div class="filter" hidden><input type="search" placeholder="Filter apps" autocomplete="off" aria-label="Filter apps by hostname"><button type="button" aria-pressed="false">Newest first</button></div>'
+    FILTER_NO_MATCH = '<p class="empty" role="status" hidden>No apps match.</p>'
+
+    # Static inline script for the hostname filter. Interpolates no request or route data.
+    FILTER_SCRIPT = <<-'JS'.chomp
+(function () {
+  var bar = document.querySelector(".filter");
+  var input = bar.querySelector("input");
+  var list = document.querySelector(".card");
+  var sort = bar.querySelector("button");
+  var rows = document.querySelectorAll(".card > li");
+  var none = document.querySelector(".empty[role=status]");
+  function apply() {
+    var query = input.value.trim().toLowerCase();
+    var shown = 0;
+    rows.forEach(function (row) {
+      var hit = row.querySelector(".name").textContent.toLowerCase().includes(query);
+      row.hidden = !hit;
+      if (hit) shown++;
+    });
+    none.hidden = shown > 0;
+  }
+  input.addEventListener("input", apply);
+  sort.addEventListener("click", function () {
+    list.append(...[...list.children].reverse());
+    sort.setAttribute("aria-pressed", sort.getAttribute("aria-pressed") !== "true");
+  });
+  apply();
+  bar.hidden = false;
+})();
+    JS
+
+    PAGE_STYLES = <<-CSS.chomp
+
+  @font-face {
+    font-family: 'Geist';
+    src: url('#{Fonts::GEIST_SANS_400}') format('woff2');
+    font-weight: 400;
+    font-display: swap;
+  }
+  @font-face {
+    font-family: 'Geist';
+    src: url('#{Fonts::GEIST_SANS_500}') format('woff2');
+    font-weight: 500;
+    font-display: swap;
+  }
+  @font-face {
+    font-family: 'Geist Mono';
+    src: url('#{Fonts::GEIST_MONO_400}') format('woff2');
+    font-weight: 400;
+    font-display: swap;
+  }
+  @font-face {
+    font-family: 'Geist Pixel';
+    src: url('#{Fonts::GEIST_PIXEL}') format('woff2');
+    font-weight: 400;
+    font-display: swap;
+  }
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+  :root {
+    --bg: #fff;
+    --fg: #171717;
+    --border: #eaeaea;
+    --surface: #fafafa;
+    --text-2: #666;
+    --text-3: #a1a1a1;
+    --accent: #0070f3;
+    --font-sans: 'Geist', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+    --font-mono: 'Geist Mono', 'SFMono-Regular', Menlo, Monaco, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #000;
+      --fg: #ededed;
+      --border: rgba(255,255,255,0.1);
+      --surface: #111;
+      --text-2: #888;
+      --text-3: #666;
+      --accent: #3291ff;
+    }
+  }
+  html { height: 100%; }
+  body {
+    font-family: var(--font-sans);
+    background: var(--bg);
+    color: var(--fg);
+    min-height: 100%;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+  .page {
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 32px 24px;
+  }
+  .hero {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+  .hero h1 {
+    font-family: 'Geist Pixel', var(--font-mono);
+    font-size: clamp(80px, 15vw, 144px);
+    font-weight: 400;
+    line-height: 1;
+    letter-spacing: -0.04em;
+    color: var(--fg);
+  }
+  .hero h2 {
+    font-size: 13px;
+    font-weight: 400;
+    color: var(--text-3);
+    margin-top: 16px;
+    text-transform: uppercase;
+    letter-spacing: 0.15em;
+  }
+  .content {
+    margin-top: 56px;
+    width: 100%;
+    max-width: 480px;
+  }
+  .desc {
+    font-size: 14px;
+    color: var(--text-2);
+    text-align: center;
+    line-height: 1.7;
+  }
+  .desc strong {
+    color: var(--fg);
+    font-weight: 500;
+  }
+  .section { margin-top: 32px; }
+  .label {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-3);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    margin-bottom: 10px;
+  }
+  .card {
+    list-style: none;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    overflow: hidden;
+  }
+  .card > li:not([hidden]) ~ li:not([hidden]) {
+    border-top: 1px solid var(--border);
+  }
+  .card-link {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 16px;
+    text-decoration: none;
+    color: inherit;
+    transition: background 0.15s ease;
+  }
+  .card-link:hover { background: var(--surface); }
+  .card-link .name {
+    font-size: 14px;
+    font-weight: 500;
+    transition: color 0.15s ease;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .card-link:hover .name { color: var(--accent); }
+  .card-link .meta {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .card-link .uptime {
+    font-size: 13px;
+    color: var(--text-3);
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+  .card-link .port {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    color: var(--text-3);
+  }
+  .card-link .arrow {
+    color: var(--text-3);
+    display: flex;
+    transition: transform 0.2s ease, color 0.2s ease;
+  }
+  .card-link:hover .arrow {
+    transform: translateX(2px);
+    color: var(--text-2);
+  }
+  .filter { display: flex; gap: 8px; margin-bottom: 10px; }
+  .filter[hidden] { display: none; }
+  .filter input {
+    flex: 1;
+    min-width: 0;
+    font: inherit;
+    font-size: 14px;
+    color: var(--fg);
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+  }
+  .filter input::placeholder { color: var(--text-3); }
+  .filter button {
+    font: inherit;
+    font-size: 14px;
+    color: var(--text-2);
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .filter button[aria-pressed="true"] {
+    color: var(--accent);
+    background: var(--surface);
+    border-color: var(--accent);
+  }
+  .filter input:focus-visible,
+  .filter button:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
+  .terminal {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 14px 20px;
+    line-height: 1.7;
+    color: var(--fg);
+  }
+  .terminal .prompt {
+    color: var(--text-3);
+    user-select: none;
+  }
+  pre.terminal { white-space: pre-wrap; }
+  .empty {
+    font-size: 14px;
+    color: var(--text-3);
+    text-align: center;
+    padding: 32px 0;
+  }
+  .footer {
+    margin-top: 64px;
+    font-size: 11px;
+    color: var(--text-3);
+    font-family: var(--font-mono);
+    letter-spacing: 0.08em;
+  }
+
+    CSS
+
+    def render_page(status, status_text, body)
+      <<-HTML.chomp
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>#{status} - #{status_text}</title>
+<style>#{PAGE_STYLES}</style>
+</head>
+<body>
+<div class="page">
+<div class="hero"><h1>#{status}</h1><h2>#{status_text}</h2></div>
+#{body}
+<p class="footer">rb-portless</p>
+</div>
+</body>
+</html>
+      HTML
+    end
+
+    # HTML-escape (utils.ts escapeHtml).
+    def escape_html(str)
+      str.to_s.gsub("&", "&amp;").gsub("<", "&lt;").gsub(">", "&gt;").gsub('"', "&quot;").gsub("'", "&#39;")
+    end
+
+    # URL for a hostname, omitting the protocol's default port (utils.ts formatUrl).
+    def format_url(hostname, proxy_port, tls = false)
+      Utils.format_url(hostname, proxy_port, tls)
+    end
+
+    # How long a route has been registered as one compact unit (45s, 12m, 2h,
+    # 3d), floor-rounded. Up to 60 s of clock skew shows 0s; nil when unknown
+    # (utils.ts formatUptime). Both arguments are epoch milliseconds.
+    def format_uptime(registered_at, now)
+      Utils.format_uptime(registered_at, now)
+    end
+  end
+end

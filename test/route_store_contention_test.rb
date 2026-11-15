@@ -20,7 +20,7 @@ class RouteStoreContentionTest < Minitest::Test
       pid = fork do
         hold_w.close
         done_r.close
-        Portless::RouteStore.new.add(hostname: "contend-#{i}.localhost", port: 4000 + i, pid: Process.pid)
+        Portless::RouteStore.new.add_route(hostname: "contend-#{i}.localhost", port: 4000 + i, pid: Process.pid)
         done_w.write(".")
         hold_r.read # block until the parent releases us
         exit! 0
@@ -50,14 +50,14 @@ class RouteStoreContentionTest < Minitest::Test
     Portless::State.ensure_dir!
     Dir.mkdir(Portless::State.routes_lock)
     # Backdate the lock dir beyond the staleness threshold.
-    old = Time.now - (Portless::RouteStore::LOCK_STALE_SECONDS + 5)
+    old = Time.now - (Portless::RouteStore::STALE_LOCK_THRESHOLD + 5)
     File.utime(old, old, Portless::State.routes_lock)
 
     store = Portless::RouteStore.new
-    store.add(hostname: "stale-lock.localhost", port: 4999, pid: Process.pid)
+    store.add_route(hostname: "stale-lock.localhost", port: 4999, pid: Process.pid)
     assert_includes store.routes.map(&:hostname), "stale-lock.localhost"
   ensure
-    Portless::RouteStore.new.remove("stale-lock.localhost")
+    Portless::RouteStore.new.remove_route("stale-lock.localhost")
     Dir.rmdir(Portless::State.routes_lock) rescue nil
   end
 end

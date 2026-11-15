@@ -2,7 +2,7 @@
 
 require_relative "test_helper"
 
-# Worktree.prefix against a real repository: the root checkout gets no prefix;
+# Auto.detect_worktree_prefix against a real repository: the root checkout gets no prefix;
 # a linked `git worktree add` on a feature branch gets the branch's last
 # segment as a subdomain label.
 class WorktreeGitTest < Minitest::Test
@@ -22,11 +22,19 @@ class WorktreeGitTest < Minitest::Test
       git.call("init", "-b", "main")
       git.call("commit", "--allow-empty", "-m", "init")
 
-      assert_nil Portless::Worktree.prefix(root), "root checkout must get no prefix"
+      assert_nil prefix(root), "root checkout must get no prefix"
 
       git.call("worktree", "add", "-b", "feature/auth-flow", linked)
-      assert_equal "auth-flow", Portless::Worktree.prefix(linked)
-      assert_nil Portless::Worktree.prefix(root), "root stays unprefixed with a linked worktree present"
+      assert_equal "auth-flow", prefix(linked)
+      assert_nil prefix(root), "root stays unprefixed with a linked worktree present"
+      assert_equal "feature-auth-flow", Portless::Auto.detect_worktree_prefix(linked, "branch").prefix
     end
+  end
+
+  private
+
+  def prefix(dir)
+    ENV.delete("PORTLESS_PREFIX")
+    Portless::Auto.detect_worktree_prefix(dir)&.prefix
   end
 end
