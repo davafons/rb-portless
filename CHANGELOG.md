@@ -4,6 +4,83 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.17.0.0] — 2026-11-16
+
+rb-portless now tracks Vercel portless exactly. Versions mirror the upstream
+release we match, plus a fourth segment for our own fixes: this release matches
+portless 0.17.0. Commands, flags, environment variables, `portless.json` /
+`package.json` config, routing, JSON output, exit codes and messages follow
+upstream. The only differences are names (`rb-portless`, `~/.rb-portless`, hosts
+markers, service ids) so both tools can be installed side by side, plus
+`SSL_CERT_FILE` for Ruby children. See README.md.
+
+### Breaking
+
+- **Rails railtie removed** (`require "portless/rails"`). Allow `*.localhost`
+  in `config.hosts` yourself.
+- **Routing is strict by default.** An unregistered subdomain now gets a 404.
+  Start the proxy with `--wildcard` (or `PORTLESS_WILDCARD=1`) for the old
+  subdomain fallback; it now picks the most specific registered parent.
+- **`portless.json` keys `tld`, `tls` and `app_port`, and the name→command
+  `apps` map, are gone.** Use `proxy start --tld` / `PORTLESS_TLD`, `--no-tls` /
+  `PORTLESS_HTTPS=0`, `--app-port` / `PORTLESS_APP_PORT`, and path-keyed `apps`.
+- **No `:1355` fallback.** Declining sudo now exits with the command to recover
+  (`--unprivileged`, or a port of your own).
+- **`proxy restart` removed**, and `run --lan` no longer restarts the proxy; a
+  running proxy with different settings prints upstream's mismatch message.
+- **The bare-run fallback to `bin/dev` / `bin/rails server` is gone.** A bare
+  `rb-portless` runs the `package.json` dev script, as upstream does.
+- **Health header is `X-Portless: 1`** (was `x-rb-portless: <version>`), and the
+  stale-proxy restart prompt is gone. Restart the proxy after upgrading.
+- **Startup banner** replaced by upstream's run output.
+- **Firefox/Chrome NSS trust** (`certutil`) removed; trust matches upstream.
+- `routes.json` uses upstream's schema. Restart running apps after upgrading.
+
+### Security
+
+- **LAN mode exposes every running app, as upstream does.** `--lan` is a proxy
+  mode: it binds `0.0.0.0` and `::`, switches to `.local`, and publishes every
+  route over mDNS. The 0.5.1 per-route `lan: true` gate and the hidden 404 app
+  list for LAN clients are removed. Without `--lan` the proxy stays loopback-only.
+- Certificates are minted only for names under the configured TLDs (any SNI
+  name used to get a cert), and hosts outside them get 421 instead of a 404
+  listing your apps.
+- `proxy stop` verifies the recorded pid is the proxy before signalling it, and
+  state dirs other users can change are refused. Root-side state writes never
+  follow symlinks.
+- The test suite no longer adds CAs to the login keychain (a test started the
+  proxy without `--skip-trust`).
+
+### Added
+
+- `mcp` (stdio MCP server, `--tools core|proxy|diagnostics|all`), `compose`
+  (Docker Compose routes), `--cloudflare`, `alias --upstream` and `alias --tld`,
+  `--unprivileged`, multiple and multi-label TLDs, `--wildcard`, `--https`,
+  `--cert/--key`, `--skip-trust`, `proxy stop -p`, `--json` for `list`/`get`/
+  `doctor`, `clean --yes`, `run --prefix` / `PORTLESS_PREFIX`, the `worktree`
+  config, `--script`, `package.json` `"portless"` config, workspace and Turbo
+  multi-app runs, hosts sync owned by the daemon, styled error pages, plain HTTP
+  on the TLS port redirected to HTTPS, backend connection pooling with parallel
+  IPv4/IPv6 dialing, and routes handed to self-daemonizing servers.
+
+### Fixed
+
+- Routes whose owner died were still served; a corrupt `routes.json` lost every
+  route on the next write.
+- `run` consumed its own flags anywhere in the command (`run vite --force` lost
+  `--force`) and ran unknown flags as the command. Usage errors exit 2.
+- `get` dropped the proxy port and the TLD of dotted names.
+- `--port` was added to `vite build` / `astro build` and duplicated after a
+  user's `--port`.
+- mDNS advertised port 80 instead of the proxy port; tailscale teardown could
+  remove a funnel it didn't create; the state dir under sudo now resolves through
+  `SUDO_USER`.
+
+### Not ported
+
+- Windows CA trust and the Windows boot service, the legacy `/tmp/portless`
+  state migration, and upstream's agent skills.
+
 ## [0.5.2] — 2026-09-08
 
 ### Fixed

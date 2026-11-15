@@ -78,7 +78,7 @@ class ComposeCommandTest < Minitest::Test
     running = Struct.new(:tlds, :lan_mode, :lan_ip).new([ "localhost" ], false, nil)
     Portless::Daemon.stub(:discover_state, state) do
       Portless::Daemon.stub(:ensure_proxy_running, { started: false }) do
-        Portless::Daemon.stub(:read_current_config, running) do
+        Portless::Daemon.stub(:read_current_proxy_config, running) do
           Portless::Daemon.stub(:report_hosts_sync, nil, &block)
         end
       end

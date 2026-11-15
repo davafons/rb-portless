@@ -666,7 +666,7 @@ module Portless
           state = ensured[:state]
           CLI.handle_trust if state.tls && !Trust.trusted?(state.dir)
         else
-          running = Daemon.read_current_config(state.dir)
+          running = Daemon.read_current_proxy_config(state.dir)
           state = state.dup
           state.tlds = running.tlds
           state.lan_mode = running.lan_mode

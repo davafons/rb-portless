@@ -190,10 +190,10 @@ end
   def test_config_mismatch_messages
     desired = resolve(explicit: explicit(use_https: true, tlds: true), use_https: false, tlds: [ "test" ])
     actual = resolve
-    messages = D.config_mismatch_messages(desired, actual, explicit(use_https: true, tlds: true))
+    messages = D.proxy_config_mismatch_messages(desired, actual, explicit(use_https: true, tlds: true))
     assert_equal [ "requested HTTP, but the running proxy is using HTTPS",
                    "requested .test, but the running proxy is using .localhost" ], messages
-    assert_empty D.config_mismatch_messages(desired, actual, explicit)
+    assert_empty D.proxy_config_mismatch_messages(desired, actual, explicit)
   end
 
   def test_format_proxy_start_command
@@ -205,7 +205,7 @@ end
 
   def test_print_config_mismatch_exits_1_with_recovery
     _, err = capture_io do
-      assert_raises(SystemExit) { D.print_config_mismatch(1355, resolve, [ "requested HTTPS" ]) }
+      assert_raises(SystemExit) { D.print_proxy_config_mismatch(1355, resolve, [ "requested HTTPS" ]) }
     end
     assert_match(/already running on port 1355 with a different config/, err)
     assert_match(/rb-portless proxy stop -p 1355/, err)
@@ -256,38 +256,6 @@ end
     end
     state = D.discover_state
     assert_nil state[:lan_ip], "LAN IP only reported while the proxy is up"
-  end
-
-  def test_ensure_running_refuses_explicit_mismatch
-    with_fake_proxy(header: true) do |port|
-      D.write_tlds(@dir, [ "test" ])
-      ENV["PORTLESS_TLD"] = "localhost"
-      exit_status = nil
-      _, err = capture_io do
-        D.ensure_running(port: port, tls: false, state_dir: @dir)
-      rescue SystemExit => e
-        exit_status = e.status
-      end
-      assert_equal 1, exit_status
-      assert_match(/Proxy is already running on port #{port} with a different config/, err)
-    ensure
-      ENV.delete("PORTLESS_TLD")
-    end
-  end
-
-  def test_ensure_running_reports_running_proxy_state
-    with_fake_proxy(header: true) do |port|
-      D.write_tlds(@dir, [ "test" ])
-      D.write_lan_marker(@dir, "10.0.0.7")
-      state = nil
-      _, err = capture_io { state = D.ensure_running(port: port, tls: false, state_dir: @dir) }
-      assert_match(/  Proxy is running/, err)
-      refute state.started
-      assert_equal [ "test" ], state.tlds
-      assert_equal "10.0.0.7", state.lan_ip
-      assert state.lan_mode
-      assert_equal port, state[:port]
-    end
   end
 
   # ── proxy stop ───────────────────────────────────────────────────────

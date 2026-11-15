@@ -161,6 +161,9 @@ module Portless
               "__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS" => Runner.format_vite_allowed_hosts(state.tlds) }
       ca = File.join(state.dir, "ca.pem")
       env["NODE_EXTRA_CA_CERTS"] = ca if state.tls && File.exist?(ca)
+      if state.tls && !ENV["SSL_CERT_FILE"] && (bundle = CaBundle.path)
+        env["SSL_CERT_FILE"] = bundle
+      end
       env
     end
 

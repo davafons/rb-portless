@@ -38,7 +38,7 @@ module Portless
     FILE_MODE = 0o644
     NOFOLLOW = defined?(File::NOFOLLOW) ? File::NOFOLLOW : 0
 
-    # discoverState's result (+ `started` from ensure_running). Struct, so
+    # discoverState's result (+ `started`). Struct, so
     # both `state.port` and `state[:port]` work.
     ProxyState = Struct.new(:dir, :port, :tls, :tld, :tlds, :lan_mode, :lan_ip, :started, keyword_init: true)
 
@@ -365,7 +365,7 @@ module Portless
       config
     end
 
-    def read_current_config(dir)
+    def read_current_proxy_config(dir)
       lan_ip = read_lan_marker(dir)
       tlds = read_tlds(dir)
       Config.new(use_https: read_tls_marker(dir), custom_cert_path: nil, custom_key_path: nil,
@@ -374,7 +374,7 @@ module Portless
     end
 
     # cli.ts getProxyConfigMismatchMessages.
-    def config_mismatch_messages(desired, actual, explicit)
+    def proxy_config_mismatch_messages(desired, actual, explicit)
       messages = []
       if explicit[:lan_mode] && desired.lan_mode != actual.lan_mode
         messages << (if desired.lan_mode
@@ -459,7 +459,7 @@ module Portless
     end
 
     # cli.ts printProxyConfigMismatch (exits 1).
-    def print_config_mismatch(port, desired, messages)
+    def print_proxy_config_mismatch(port, desired, messages)
       port_flag = port == default_port(desired.use_https) ? "" : " -p #{port}"
       err("Proxy is already running on port #{port} with a different config.", :yellow)
       messages.each { |m| err("- #{m}", :yellow) }
@@ -470,9 +470,6 @@ module Portless
     end
 
     # Upstream's full names (readCurrentProxyConfig etc.), used by CLI.
-    def read_current_proxy_config(dir) = read_current_config(dir)
-    def proxy_config_mismatch_messages(desired, actual, explicit) = config_mismatch_messages(desired, actual, explicit)
-    def print_proxy_config_mismatch(port, desired, messages) = print_config_mismatch(port, desired, messages)
 
     # ── `proxy start` (cli.ts handleProxy) ───────────────────────────────
     # Keyword args are upstream's flags; nil = flag not given.
@@ -609,9 +606,9 @@ module Portless
       store.recover_corrupt_routes_file if store.respond_to?(:recover_corrupt_routes_file)
 
       if running_port || proxy_running?(proxy_port)
-        running = read_current_config(state_dir)
-        messages = config_mismatch_messages(desired, running, explicit)
-        print_config_mismatch(proxy_port, desired, messages) unless messages.empty?
+        running = read_current_proxy_config(state_dir)
+        messages = proxy_config_mismatch_messages(desired, running, explicit)
+        print_proxy_config_mismatch(proxy_port, desired, messages) unless messages.empty?
         return true if foreground
 
         port_flag = proxy_port == default_port(use_https) ? "" : " -p #{proxy_port}"
@@ -1413,38 +1410,6 @@ module Portless
         die!
       end
       { started: true, state: discovered }
-    end
-
-    # runApp's whole proxy step: resolve the desired config, auto-start the
-    # proxy (or refuse a mismatched running one), and return the effective
-    # state with `started`. The caller runs handleTrust when started && tls.
-    def ensure_running(port:, tls:, lan_mode: false, lan_ip: nil, state_dir: nil)
-      state_dir ||= State.dir
-      begin
-        desired = resolve_desired_state(lan_mode)
-      rescue Error => e
-        err("Error: #{e.message}", :red)
-        die!
-      end
-
-      result = ensure_proxy_running(port, tls, desired)
-      if result[:started]
-        state = result[:state]
-        state.started = true
-      else
-        running = read_current_config(state_dir)
-        messages = config_mismatch_messages(desired[:desired_config], running, desired[:explicit])
-        print_config_mismatch(port, desired[:desired_config], messages) unless messages.empty?
-        state = ProxyState.new(dir: state_dir, port: port, tls: tls, tld: running.tld, tlds: running.tlds,
-                                  lan_mode: running.lan_mode, lan_ip: running.lan_ip, started: false)
-        err("  Proxy is running", :gray)
-      end
-
-      if desired[:explicit][:tlds] && desired[:env_tlds] != state.tlds
-        warn Colors.yellow("Warning: PORTLESS_TLD=#{desired[:env_tlds].join(',')} but the running proxy uses " \
-                           "#{format_tld_list(state.tlds)}.", io: $stderr)
-      end
-      state
     end
 
     # ── hosts sync client (cli-utils.ts) ─────────────────────────────────

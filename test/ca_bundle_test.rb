@@ -56,4 +56,16 @@ class CaBundleTest < Minitest::Test
     assert Portless::CaBundle.stale?(bundle)
     refute_equal before, File.read(Portless::CaBundle.path)
   end
+
+  def test_multi_app_child_env_gets_the_bundle_like_single_app_runs
+    state = Portless::Daemon::ProxyState.new(dir: @dir, tls: true, tlds: [ "localhost" ])
+    multi = Portless::Multi.allocate
+    env = multi.send(:app_env, state, 4123, "https://web.localhost")
+    assert_equal Portless::State.ca_cert, env["NODE_EXTRA_CA_CERTS"]
+    assert_equal Portless::CaBundle.bundle_path, env["SSL_CERT_FILE"]
+
+    plain = multi.send(:app_env, Portless::Daemon::ProxyState.new(dir: @dir, tls: false, tlds: [ "localhost" ]),
+                       4123, "http://web.localhost")
+    refute plain.key?("SSL_CERT_FILE")
+  end
 end
