@@ -144,7 +144,8 @@ module Portless
     HELP_PRINTERS = {
       "get" => :print_get_help, "list" => :print_list_help, "proxy" => :print_proxy_help,
       "service" => :print_service_help, "hosts" => :print_hosts_help, "doctor" => :print_doctor_help,
-      "trust" => :print_trust_help, "clean" => :print_clean_help, "prune" => :print_prune_help
+      "trust" => :print_trust_help, "clean" => :print_clean_help, "prune" => :print_prune_help,
+      "mcp" => :print_mcp_help
     }.freeze
 
     def run_named_command(command, args, global_script)
@@ -160,7 +161,8 @@ module Portless
       when "trust" then CLI.handle_trust(args)
       when "clean" then handle_clean(args)
       when "prune" then handle_prune(args)
-      when "mcp", "compose"
+      when "mcp" then Mcp.run(args[1..])
+      when "compose"
         # Reserved upstream commands, not ported yet.
         raise Error, "rb-portless #{command} is not supported yet."
       end
@@ -980,5 +982,7 @@ module Portless
       puts VERSION
       0
     end
+
+    def print_mcp_help = Mcp.print_help
   end
 end

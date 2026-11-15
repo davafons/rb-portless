@@ -18,6 +18,7 @@ module Portless
           rb-portless <name> <cmd>            Run with an explicit app name
           rb-portless proxy start             Start the proxy
           rb-portless proxy stop              Stop the proxy
+          rb-portless mcp [--tools <profiles>] Start the stdio MCP server
           rb-portless service install         Start proxy automatically when the OS starts
           rb-portless get <name>              Print URL for a service
           rb-portless alias <name> <port>     Register a static route
