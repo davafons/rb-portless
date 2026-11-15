@@ -71,7 +71,7 @@ module Portless
     # Returns the exit code.
     def run
       @store.recover_corrupt_routes_file
-      warn Colors.bold("\nrb-portless\n", io: $stderr)
+      $stderr.write(Colors.bold("\nrb-portless\n", io: $stderr), "\n") # console.error semantics
 
       wants_funnel = Utils.env_enabled?("PORTLESS_FUNNEL")
       wants_tailscale = wants_funnel || Utils.env_enabled?("PORTLESS_TAILSCALE")
@@ -122,7 +122,7 @@ module Portless
 
       hostnames = self.class.build_hostnames(@name, @tlds)
       hostname = hostnames.first
-      gray = ->(s) { warn Colors.gray(s, io: $stderr) }
+      gray = ->(s) { $stderr.write(Colors.gray(s, io: $stderr), "\n") }
       gray.("  #{hostnames.join(', ')} #{@lan_ip ? "(LAN: #{@lan_ip})" : '(auto-resolves to 127.0.0.1)'}")
       if @auto_info
         gray.("  Name \"#{@auto_info.base_name}\" (from #{@auto_info.name_source})")
@@ -146,7 +146,7 @@ module Portless
 
       final_url = Utils.format_url(hostname, @proxy_port, @tls)
       all_urls = hostnames.map { |h| Utils.format_url(h, @proxy_port, @tls) }
-      warn Colors.bold("\n  -> #{final_url}\n", io: $stderr)
+      $stderr.write(Colors.bold("\n  -> #{final_url}\n", io: $stderr), "\n")
       all_urls.drop(1).each { |u| warn "  also -> #{u}" }
       warn "" if all_urls.length > 1
       if @lan_ip
@@ -249,8 +249,8 @@ module Portless
       @tailscale = Share::Tailscale.start(app_port: port, funnel: funnel, base_url: base_url)
       label = funnel ? "Funnel (public)" : "Tailscale"
       warn "  #{label} -> #{@tailscale.url}"
-      warn Colors.gray(funnel ? "  (accessible from the public internet via Tailscale Funnel)\n" \
-                              : "  (accessible from your tailnet)\n", io: $stderr)
+      $stderr.write(Colors.gray(funnel ? "  (accessible from the public internet via Tailscale Funnel)\n" \
+                                       : "  (accessible from your tailnet)\n", io: $stderr), "\n")
       begin
         @store.update_route(hostname, tailscale_url: @tailscale.url, tailscale_https_port: @tailscale.https_port,
                                       tailscale_funnel: funnel || nil)
@@ -269,7 +269,7 @@ module Portless
         end
         @tunnel_handles << handle
         warn "  #{t[:label]} -> #{handle.url}"
-        warn Colors.gray("  (accessible from the public internet via #{t[:via]})\n", io: $stderr)
+        $stderr.write(Colors.gray("  (accessible from the public internet via #{t[:via]})\n", io: $stderr), "\n")
         begin
           @store.update_route(hostname, t[:url_field] => handle.url, t[:pid_field] => handle.pid)
         rescue StandardError

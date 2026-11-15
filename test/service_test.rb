@@ -103,3 +103,12 @@ class ServiceTest < Minitest::Test
     assert_equal %w[service uninstall], args.last(2)
   end
 end
+
+class ServiceBareHelpTest < Minitest::Test
+  def test_bare_service_prints_the_same_help_as_service_help
+    bare, = capture_io { Portless::Service.print_help }
+    flag, = capture_io { Object.new.extend(Portless::Help).print_service_help }
+    assert_equal flag, bare
+    assert_includes bare, "Windows installs a Task Scheduler startup task that runs as SYSTEM.\n\n"
+  end
+end

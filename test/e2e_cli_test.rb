@@ -52,6 +52,30 @@ class E2ECliHarnessTest < E2ECliTest
     assert_equal 404, status_of(@proxy_port, "lifecycle.localhost")
   end
 
+  # Byte-for-byte upstream banner (console.error keeps the blank lines that
+  # Ruby's warn would swallow) and the command's exit code passes through.
+  def test_run_banner_layout_and_exit_code
+    start_proxy(@env, @proxy_port)
+    out, err, st = cli(@env, "myapp", "sh", "-c", "exit 3")
+    assert_equal 3, st.exitstatus, err
+    assert_equal "", out
+    port = err[/Using port (\d+)/, 1]
+    expected = <<~TEXT
+
+      rb-portless
+
+        Proxy is running
+        myapp.localhost (auto-resolves to 127.0.0.1)
+        Using port #{port}
+
+        -> http://myapp.localhost:#{@proxy_port}
+
+      Running: PORT=#{port} HOST=127.0.0.1 PORTLESS_URL=http://myapp.localhost:#{@proxy_port} sh -c exit 3
+
+    TEXT
+    assert_equal expected, err
+  end
+
   # name => [fixture dir, command, expected body]
   FRAMEWORKS = {
     "express" => [ "express-app", %w[node server.js], "hello from express" ],

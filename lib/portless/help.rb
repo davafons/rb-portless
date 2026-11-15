@@ -413,7 +413,7 @@ module Portless
           up recreates the containers with their original ports.
 
       TEXT
-      "prune" => <<~'TEXT',
+      "prune" => <<~'TEXT'
 
         rb-portless prune - Clean up routes left by crashed rb-portless sessions.
 

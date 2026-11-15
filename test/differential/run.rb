@@ -18,6 +18,7 @@ require "socket"
 require "tmpdir"
 require "fileutils"
 require "optparse"
+require "openssl"
 
 ROOT = File.expand_path("../..", __dir__)
 
@@ -51,6 +52,32 @@ end
 
 PROXY_PORT = opts[:port] || free_port
 DEAD_PORT = free_port # alias target nobody listens on
+OTHER_PORT = free_port # a second proxy port, only used in mismatch scenarios
+
+# A live backend that answers with the request it saw (line + headers) as JSON,
+# so the proxy's request rewriting (X-Forwarded-*, hops, Host) is compared too.
+ECHO = TCPServer.new("127.0.0.1", 0)
+ECHO_PORT = ECHO.addr[1]
+Thread.new do
+  loop do
+    client = ECHO.accept
+    Thread.new(client) do |c|
+      line = c.gets.to_s.strip
+      headers = {}
+      while (l = c.gets) && l != "\r\n"
+        k, v = l.split(":", 2)
+        headers[k.strip.downcase] = v.to_s.strip
+      end
+      body = JSON.generate(line: line, headers: headers.sort.to_h)
+      c.write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nX-Backend: echo\r\n" \
+              "Content-Length: #{body.bytesize}\r\nConnection: close\r\n\r\n#{body}")
+    ensure
+      c.close
+    end
+  rescue IOError
+    break
+  end
+end
 
 class Tool
   attr_reader :name, :state_dir
@@ -83,6 +110,14 @@ class Tool
     end
   end
 
+  def write(name, content)
+    File.write(File.join(@cwd, name), content)
+  end
+
+  def remove(name)
+    FileUtils.rm_f(File.join(@cwd, name))
+  end
+
   def cleanup
     FileUtils.rm_rf([ @state_dir, @cwd ])
   end
@@ -97,11 +132,15 @@ class Tool
     s.gsub!(/rb-rb-portless/, "rb-portless")
     s.gsub!(PROXY_PORT.to_s, "<PROXY_PORT>")
     s.gsub!(DEAD_PORT.to_s, "<DEAD_PORT>")
-    s.gsub!(/\b(pid|PID|process group|pgid)\s+\d+/) { "#{Regexp.last_match(1)} <PID>" }
+    s.gsub!(ECHO_PORT.to_s, "<ECHO_PORT>")
+    s.gsub!(OTHER_PORT.to_s, "<OTHER_PORT>")
+    s.gsub!(/\b(Killed process|pid|PID|process group|pgid)\s+\d+/) { "#{Regexp.last_match(1)} <PID>" }
     s.gsub!(/"(pid|registeredAt)":\s*\d+/) { "\"#{Regexp.last_match(1)}\":<N>" }
     s.gsub!(/\bup \d+[smhd]( \d+[smhd])?/, "up <UPTIME>")
     s.gsub!(/\b\d+\.\d+\.\d+(-[\w.]+)?\b/, "<VERSION>")
     s.gsub!(/\d{4}-\d\d-\d\dT[\d:.]+Z/, "<TIME>")
+    s.gsub!(/(?<![\d.])4\d{3}(?![\d.])/, "<APP_PORT>") # random 4000-4999 app ports
+    s.gsub!(/(Proxy PID file points to the responding proxy process: )\d+/, "\\1<PID>")
     s
   end
 end
@@ -131,14 +170,27 @@ USAGE = [
 STATELESS = [ %w[list], %w[list --json], %w[get myapp], %w[get myapp --json], %w[get myapp --no-worktree],
               %w[prune], %w[proxy stop] ].freeze
 
-def http(method, host, headers: {}, path: "/")
+def http(method, host, headers: {}, path: "/", version: "HTTP/1.1", tls: false)
   sock = TCPSocket.new("127.0.0.1", PROXY_PORT)
-  lines = [ "#{method} #{path} HTTP/1.1" ]
+  if tls
+    ctx = OpenSSL::SSL::SSLContext.new
+    ctx.verify_mode = OpenSSL::SSL::VERIFY_NONE
+    sock = OpenSSL::SSL::SSLSocket.new(sock, ctx)
+    sock.hostname = host if host
+    sock.sync_close = true
+    sock.connect
+  end
+  lines = [ "#{method} #{path} #{version}" ]
   lines << "Host: #{host}" if host
   headers.each { |k, v| lines << "#{k}: #{v}" }
   lines << "Connection: close"
   sock.write(lines.join("\r\n") + "\r\n\r\n")
-  raw = sock.read
+  raw = +""
+  begin
+    loop { raw << sock.readpartial(65_536) }
+  rescue EOFError, OpenSSL::SSL::SSLError, Errno::ECONNRESET
+    nil
+  end
   sock.close
   head, body = raw.split("\r\n\r\n", 2)
   status_line, *hdrs = head.split("\r\n")
@@ -175,7 +227,21 @@ HTTP_CASES = {
   "502 html" => [ "GET", "dead.localhost", { "Accept" => "text/html" } ],
   "508 json" => [ "GET", "dead.localhost", { "x-portless-hops" => "5" } ],
   "508 html" => [ "GET", "dead.localhost", { "x-portless-hops" => "5", "Accept" => "text/html" } ],
-  "wildcard strict 404" => [ "GET", "sub.dead.localhost" ]
+  "wildcard strict 404" => [ "GET", "sub.dead.localhost" ],
+  "400 no host http/1.0" => [ "GET", nil, {}, "HTTP/1.0" ],
+  "404 HEAD health probe" => [ "HEAD", "localhost" ]
+}.freeze
+
+RUN_CASES = {
+  "exit code" => [ "myapp", "sh", "-c", "exit 3" ],
+  "env" => [ "myapp", "sh", "-c", "echo PORT=$PORT HOST=$HOST URL=$PORTLESS_URL" ],
+  "run --name" => [ "run", "--name", "named", "sh", "-c", "echo $PORTLESS_URL" ],
+  "--name reserved" => [ "--name", "list", "sh", "-c", "echo $PORTLESS_URL" ],
+  "app-port" => [ "myapp", "--app-port", "DEAD", "sh", "-c", "echo PORT=$PORT" ],
+  "dotted name" => [ "api.myapp", "sh", "-c", "echo $PORTLESS_URL" ],
+  "full hostname" => [ "api.myapp.localhost", "sh", "-c", "echo $PORTLESS_URL" ],
+  "run no command, no package.json" => [ "run" ],
+  "zero-arg no package.json" => []
 }.freeze
 
 # Returns { scenario_name => result_hash } for one tool.
@@ -201,6 +267,17 @@ def collect(tool, only)
   record.call("proxy: alias dead") { tool.run(%W[alias dead #{DEAD_PORT}]) }
   record.call("proxy: alias dead again") { tool.run(%W[alias dead #{DEAD_PORT}]) }
   record.call("proxy: alias other.localhost") { tool.run(%W[alias other.localhost #{DEAD_PORT}]) }
+  record.call("proxy: alias echo") { tool.run(%W[alias echo #{ECHO_PORT}]) }
+  record.call("proxy: alias up --upstream https") { tool.run(%W[alias up #{DEAD_PORT} --upstream https://example.test]) }
+  record.call("proxy: alias Bad_Name") { tool.run(%w[alias Bad_Name 3000]) }
+  record.call("proxy: alias --force existing") { tool.run(%W[alias dead #{DEAD_PORT} --force]) }
+  record.call("proxy: alias over name with tld test") { tool.run(%W[alias foo.test #{DEAD_PORT}]) }
+  record.call("proxy: get bad name") { tool.run(%w[get Bad_Name]) }
+  record.call("proxy: get up --json") { tool.run(%w[get up --json]) }
+  record.call("proxy: start on other port while running") do
+    tool.run(%W[proxy start --no-tls -p #{OTHER_PORT}]).tap { tool.run(%w[proxy stop -p] + [ OTHER_PORT.to_s ]) }
+  end
+  record.call("proxy: stop -p other port (nothing there)") { tool.run(%W[proxy stop -p #{OTHER_PORT}]) }
   sleep 1.5 # proxies reload routes.json on a debounce
   record.call("proxy: list") { tool.run(%w[list]) }
   record.call("proxy: list --json") { tool.run(%w[list --json]) }
@@ -210,7 +287,27 @@ def collect(tool, only)
   record.call("proxy: routes.json") do
     { "body" => JSON.pretty_generate(JSON.parse(File.read(File.join(tool.state_dir, "routes.json")))) }
   end
-  HTTP_CASES.each { |name, (m, host, hdrs)| record.call("http: #{name}") { http(m, host, headers: hdrs || {}) } }
+  record.call("http: echo proxied request") do
+    http("GET", "echo.localhost", path: "/a/b?c=1", headers: { "X-Forwarded-For" => "1.2.3.4", "User-Agent" => "diff" })
+  end
+  record.call("http: echo wildcard subdomain (strict)") { http("GET", "sub.echo.localhost") }
+  record.call("http: echo with port in Host") { http("GET", "echo.localhost:#{PROXY_PORT}") }
+  record.call("http: echo POST body") { http("POST", "echo.localhost", headers: { "Content-Length" => "0" }) }
+  HTTP_CASES.each do |name, (m, host, hdrs, version)|
+    record.call("http: #{name}") { http(m, host, headers: hdrs || {}, version: version || "HTTP/1.1") }
+  end
+  RUN_CASES.each do |name, args|
+    record.call("run: #{name}") { tool.run(args.map { |a| a == "DEAD" ? DEAD_PORT.to_s : a }, timeout: 20) }
+  end
+  record.call("run: PORTLESS=0") { tool.run(%w[myapp sh -c] + [ "echo PORT=$PORT" ], env: { "PORTLESS" => "0" }) }
+  tool.write("package.json", JSON.generate(name: "pkgapp", scripts: { dev: "echo dev-ran $PORTLESS_URL" }))
+  record.call("run: zero-arg package.json dev script") { tool.run([], timeout: 60) }
+  record.call("run: zero-arg --script missing") { tool.run(%w[--script start], timeout: 60) }
+  record.call("run: run (infers name from package.json)") { tool.run(%w[run sh -c] + [ "echo $PORTLESS_URL" ]) }
+  tool.remove("package.json")
+  record.call("proxy: routes.json after runs") do
+    { "body" => JSON.pretty_generate(JSON.parse(File.read(File.join(tool.state_dir, "routes.json")))) }
+  end
   record.call("proxy: prune with live aliases") { tool.run(%w[prune]) }
   record.call("proxy: doctor --json") { tool.run(%w[doctor --json]) }
   record.call("proxy: alias --remove dead") { tool.run(%w[alias --remove dead]) }
@@ -218,6 +315,28 @@ def collect(tool, only)
   record.call("proxy: alias --remove other.localhost") { tool.run(%w[alias --remove other.localhost]) }
   results["proxy: stop"] = tool.run(%w[proxy stop])
   record.call("proxy: stop again") { tool.run(%w[proxy stop]) }
+
+  tls_env = { "PORTLESS_HTTPS" => nil }
+  results["tls: proxy start"] = tool.run(%W[proxy start -p #{PROXY_PORT} --skip-trust], env: tls_env)
+  record.call("tls: state files") { { "body" => Dir.children(tool.state_dir).sort.join("\n") } }
+  record.call("tls: start again") { tool.run(%W[proxy start -p #{PROXY_PORT} --skip-trust], env: tls_env) }
+  record.call("tls: start --no-tls (mismatch)") { tool.run(%W[proxy start -p #{PROXY_PORT} --no-tls], env: tls_env) }
+  record.call("tls: get myapp") { tool.run(%w[get myapp], env: tls_env) }
+  record.call("tls: alias + list") do
+    tool.run(%W[alias dead #{DEAD_PORT}], env: tls_env)
+    tool.run(%w[list], env: tls_env)
+  end
+  sleep 1.5
+  record.call("tls: https 404 json") { http("GET", "nope.localhost", tls: true) }
+  record.call("tls: https 502 json") { http("GET", "dead.localhost", tls: true) }
+  record.call("tls: https 421") { http("GET", "example.com", tls: true) }
+  record.call("tls: plain http on tls port") { http("GET", "dead.localhost") }
+  record.call("tls: run env") do
+    tool.run(%w[myapp sh -c] + [ "echo URL=$PORTLESS_URL SSL=${SSL_CERT_FILE:+set} NODE=${NODE_EXTRA_CA_CERTS:+set}" ],
+             env: tls_env)
+  end
+  record.call("tls: doctor --json") { tool.run(%w[doctor --json], env: tls_env) }
+  results["tls: stop"] = tool.run(%w[proxy stop], env: tls_env)
   results
 ensure
   tool.run(%w[proxy stop])

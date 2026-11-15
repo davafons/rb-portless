@@ -381,6 +381,10 @@ module Portless
       return text(403, "Forbidden", PORTLESS_HEADER => "1") if refuses_peer?(peer)
 
       raw_host = request_host(request)
+      # Node's HTTP/1.1 parser rejects a request without Host before
+      # portless's handler runs: a bare 400, no headers, no body.
+      return ::Protocol::HTTP::Response[400, {}, []] if raw_host.empty? && request.version == "HTTP/1.1"
+
       extra = { PORTLESS_HEADER => "1" }
       add_hosts_sync_proof(request, peer, raw_host, extra)
 
@@ -428,11 +432,11 @@ module Portless
       log_error("Proxy error for #{host}: #{format_proxy_error(error)}")
       detail = if tls_error?(error)
                  TLS_502_DETAIL
-               elsif error.is_a?(Errno::ECONNREFUSED)
+      elsif error.is_a?(Errno::ECONNREFUSED)
                  "The target app is not responding. It may have crashed."
-               else
+      else
                  "The target app may not be running."
-               end
+      end
       send_proxy_error(request, 502, "bad_gateway", detail, host) do
         Pages.render_page(502, "Bad Gateway", %(<div class="content"><p class="desc">#{Pages.escape_html(detail)}</p></div>))
       end
@@ -489,9 +493,9 @@ module Portless
       end.join
       routes_list = if routes.empty?
                       '<p class="empty">No apps running.</p>'
-                    else
+      else
                       %(<div class="section"><p class="label">Active apps</p>#{filterable ? Pages::FILTER_CONTROLS : ''}<ul class="card">#{items}</ul>#{filterable ? Pages::FILTER_NO_MATCH : ''}</div>#{filterable ? "<script>#{Pages::FILTER_SCRIPT}</script>" : ''})
-                    end
+      end
       Pages.render_page(404, "Not Found",
                         %(<div class="content"><p class="desc">No app registered for <strong>#{safe_host}</strong></p>#{routes_list}<div class="section"><div class="terminal"><span class="prompt">$ </span>rb-portless #{Pages.escape_html(stripped)} your-command</div></div></div>))
     end
@@ -571,9 +575,9 @@ module Portless
       log_error("WebSocket proxy error for #{request_host(request)}: #{format_proxy_error(e)}")
       body = if tls_error?(e)
                "Bad Gateway: could not connect to the target app over HTTPS. Check that it supports TLS on the configured port.\n"
-             else
+      else
                "Bad Gateway: the target app is not responding or sent an invalid response to the WebSocket handshake.\n"
-             end
+      end
       text(502, body, "connection" => "close")
     end
 
@@ -721,7 +725,7 @@ module Portless
       def authority = "localhost:#{@port}"
       def secure? = false
       def to_s = "upstream:#{@port}"
-      def inspect = "#<#{self.class} #{to_s}>"
+      def inspect = "#<#{self.class} #{self}>"
 
       def connect
         socket = @limit.acquire { Proxy.create_loopback_connection(@port, timeout: UPSTREAM_CONNECT_TIMEOUT) }

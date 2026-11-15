@@ -92,7 +92,7 @@ module Portless
         )
       end
 
-      warn Colors.bold("\nrb-portless\n", io: $stderr)
+      $stderr.write(Colors.bold("\nrb-portless\n", io: $stderr), "\n")
       state = CLI.discover_state
       if proxied_apps.any?
         desired = Daemon.resolve_desired_state(false)
@@ -120,10 +120,10 @@ module Portless
       when "unsafe"
         hints = if forwarding[:turbo]
                   [ "  Change the root \"#{script_name}\" script to a single command, such as \"turbo #{script_name}\"." ]
-                else
+        else
                   [ "  Run the command directly: rb-portless run <command> #{forwarded}",
                     "  Or change the root \"#{script_name}\" script to a single command." ]
-                end
+        end
         raise UsageError.new("Cannot forward arguments through the \"#{script_name}\" root script. It has shell " \
                              "operators or a comment.", hints)
       when "too-deep"

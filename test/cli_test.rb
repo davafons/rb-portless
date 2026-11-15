@@ -6,7 +6,6 @@ require "json"
 # CLI dispatch, flag parsing, get/list/alias, exit codes. Daemon state is
 # stubbed with the hash shape Daemon.discover_state returns.
 class CliTest < Minitest::Test
-
   def setup
     @saved_env = ENV.to_h
     %w[PORTLESS PORTLESS_LAN PORTLESS_LAN_IP PORTLESS_TAILSCALE PORTLESS_FUNNEL PORTLESS_NGROK PORTLESS_CLOUDFLARE
@@ -148,5 +147,26 @@ class CliTest < Minitest::Test
     assert port.between?(4000, 4999)
     refute_includes Portless::FreePort::BLOCKED_PORTS, port
     assert Portless::FreePort.available?(port)
+  end
+end
+
+class CliTest
+  def test_list_heading_keeps_blank_line_like_console_log
+    Portless::RouteStore.new.add_route(hostname: "listed.localhost", port: 4567, pid: 0, force: true)
+    code, out, = cli("list")
+    assert_equal 0, code
+    assert out.start_with?("\nActive routes:\n\n  https://listed.localhost:1355  ->  localhost:4567  (alias)\n"), out.inspect
+  ensure
+    Portless::RouteStore.new.remove_route("listed.localhost")
+  end
+end
+
+class DoctorPlatformTest < Minitest::Test
+  def test_platform_uses_node_spelling
+    assert_equal "darwin", Portless::Doctor.node_platform("darwin25")
+    assert_equal "linux", Portless::Doctor.node_platform("linux-gnu")
+    assert_equal "win32", Portless::Doctor.node_platform("mingw32")
+    assert_equal "arm64", Portless::Doctor.node_arch("aarch64")
+    assert_equal "x64", Portless::Doctor.node_arch("x86_64")
   end
 end

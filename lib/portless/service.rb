@@ -708,40 +708,8 @@ module Portless
       puts "  Service entry: #{info[:details]}" if info[:details]
     end
 
-    def print_help
-      puts <<~HELP
-
-        #{Colors.bold('rb-portless service')} - Start rb-portless automatically when the OS starts.
-
-        #{Colors.bold('Usage:')}
-          #{Colors.cyan('rb-portless service install')}             Install and start the HTTPS service on port 443
-          #{Colors.cyan('rb-portless service install --lan')}       Enable LAN mode for the startup service
-          #{Colors.cyan('rb-portless service install -p 8443')}     Use a custom proxy port
-          #{Colors.cyan('rb-portless service uninstall')}           Stop and remove the startup service
-          #{Colors.cyan('rb-portless service status')}              Show service and proxy status
-
-        #{Colors.bold('Install options:')}
-          -p, --port <number>              Port for the proxy service
-          --no-tls                         Disable HTTPS
-          --https                          Enable HTTPS
-          --lan                            Enable LAN mode
-          --ip <address>                   Pin a specific LAN IP
-          --tld <tld>                      Use a custom TLD outside LAN mode, repeatable
-          --wildcard                       Allow subdomain fallback
-          --unprivileged                   Bind the wildcard address, loopback peers only, no elevation
-          --cert <path>                    Use a custom TLS certificate
-          --key <path>                     Use a custom TLS private key
-          --state-dir <path>               Use a custom service state directory
-
-        #{Colors.bold('Notes:')}
-          Value flags accept both --flag <value> and --flag=<value>.
-          The service uses the default clean URL mode unless options or PORTLESS_*
-          environment variables are provided during install.
-          macOS and Linux install a root-owned service so port 443 can bind at boot.
-          On macOS and Linux, install exits with the reason when another user owns,
-          can write to, or can redirect the state directory.
-      HELP
-    end
+    # Same text as `service --help` (upstream: one printServiceHelp).
+    def print_help = Object.new.extend(Help).print_service_help
 
     # `rb-portless service …` (argv includes "service"). service.ts handleService.
     def handle(args)

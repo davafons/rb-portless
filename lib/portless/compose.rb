@@ -338,9 +338,9 @@ module Portless
 
       rows = if trimmed.start_with?("[")
                JSON.parse(trimmed)
-             else
+      else
                trimmed.split("\n").reject { |line| line.strip.empty? }.map { |line| JSON.parse(line) }
-             end
+      end
       rows.each do |r|
         project = r["Project"]
         result.projects << project if project && !project.empty? && !result.projects.include?(project)
@@ -782,7 +782,7 @@ module Portless
           end
         end
         # Ctrl+C reaches compose through the process group; wait for it to stop.
-        previous_int = trap("INT") {}
+        previous_int = trap("INT") { }
         previous_term = trap("TERM") do
           Process.kill("TERM", child[:pid]) if child[:pid]
         rescue SystemCallError

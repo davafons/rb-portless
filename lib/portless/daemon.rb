@@ -671,7 +671,7 @@ module Portless
       end
 
       if foreground
-        out(Colors.bold("\nrb-portless proxy\n", io: $stdout))
+        $stdout.write(Colors.bold("\nrb-portless proxy\n", io: $stdout), "\n")
         return start_proxy_server(store, proxy_port, desired.tld, flag_tlds, tls_options, lan_ip,
                                   desired.use_wildcard ? false : nil, !!(custom_cert_path && custom_key_path),
                                   desired.unprivileged)
@@ -1001,7 +1001,7 @@ module Portless
             )
           end
         end
-        out(Colors.cyan("\nProxy is running. Press Ctrl+C to stop.\n", io: $stdout))
+        $stdout.write(Colors.cyan("\nProxy is running. Press Ctrl+C to stop.\n", io: $stdout), "\n")
         out("Routes file: #{routes_path}", :gray)
       end
 

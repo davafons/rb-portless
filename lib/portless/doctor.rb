@@ -12,6 +12,26 @@ module Portless
     Finding = Struct.new(:status, :message, :hint)
     MIN_RUBY = "3.2"
 
+    # Node's process.platform / process.arch spelling, as upstream reports it.
+    def self.node_platform(host_os = RbConfig::CONFIG["host_os"])
+      case host_os
+      when /darwin/ then "darwin"
+      when /linux/ then "linux"
+      when /mswin|mingw|cygwin/ then "win32"
+      when /freebsd/ then "freebsd"
+      else host_os
+      end
+    end
+
+    def self.node_arch(host_cpu = RbConfig::CONFIG["host_cpu"])
+      case host_cpu
+      when /\A(arm64|aarch64)\z/ then "arm64"
+      when /\A(x86_64|x64|amd64)\z/ then "x64"
+      when /\Ai[3-6]86\z/ then "ia32"
+      else host_cpu
+      end
+    end
+
     def initialize(json: false)
       @json = json
       @findings = []
@@ -54,12 +74,12 @@ module Portless
       custom_cert = proxy_tls && File.exist?(File.join(state.dir, "proxy.custom-cert"))
       state_exists = File.exist?(state.dir)
 
-      platform = "#{RbConfig::CONFIG['host_os']} #{RbConfig::CONFIG['host_cpu']}"
+      platform = "#{self.class.node_platform} #{self.class.node_arch}"
       proxy_target = Utils.format_url("127.0.0.1", proxy_port, proxy_tls)
       mode = "#{proxy_tls ? 'HTTPS' : 'HTTP'}, #{state.tlds.map { |t| ".#{t}" }.join(', ')}#{state.lan_mode ? ', LAN' : ''}"
 
       unless @json
-        puts Colors.bold("\nrb-portless doctor\n")
+        print Colors.bold("\nrb-portless doctor\n"), "\n"
         puts "Version: #{VERSION}"
         puts "Ruby: #{RUBY_VERSION}"
         puts "Platform: #{platform}"

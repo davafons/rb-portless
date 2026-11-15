@@ -525,7 +525,7 @@ module Portless
         return
       end
 
-      puts Colors.bold("\nActive routes:\n")
+      print Colors.bold("\nActive routes:\n"), "\n" # console.log keeps the trailing blank line
       now = (Time.now.to_f * 1000).to_i
       routes.each do |r|
         url = Utils.format_url(r.hostname, proxy_port, tls)

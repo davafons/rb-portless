@@ -17,9 +17,9 @@ module Portless
     MARKER_END = Constants::HOSTS_END
     DEFAULT_PATH = if Constants::WINDOWS
                      File.join(ENV.fetch("SystemRoot", "C:\\Windows"), "System32", "drivers", "etc", "hosts")
-                   else
+    else
                      "/etc/hosts"
-                   end
+    end
 
     class << self
       # Test seam (upstream mocks fs); never set from the environment.

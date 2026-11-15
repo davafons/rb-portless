@@ -18,10 +18,10 @@ module Portless
     # CA), `false` over plain HTTP. `nil` tries TLS first, then plain HTTP.
     def proxy_running?(port, tls: nil, timeout: SOCKET_TIMEOUT)
       responses = case tls
-                  when true then [ probe_tls(port, timeout) ]
-                  when false then [ probe_plain(port, timeout) ]
-                  else [ probe_tls(port, timeout) || probe_plain(port, timeout) ]
-                  end
+      when true then [ probe_tls(port, timeout) ]
+      when false then [ probe_plain(port, timeout) ]
+      else [ probe_tls(port, timeout) || probe_plain(port, timeout) ]
+      end
       responses.any? { |response| marker?(response) }
     end
 

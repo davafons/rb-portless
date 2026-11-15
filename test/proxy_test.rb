@@ -260,6 +260,14 @@ class ProxyTest < Minitest::Test
     assert_includes response, "Missing Host header"
   end
 
+  def test_http11_without_host_is_a_bare_400_like_node
+    port = start_proxy([])
+    response = raw(port, "GET / HTTP/1.1\r\nConnection: close\r\n\r\n")
+    assert_match(/\AHTTP\/1\.1 400/, response)
+    refute_includes response.downcase, "x-portless"
+    refute_includes response, "Missing Host header"
+  end
+
   def test_loop_detection_returns_508
     port = start_proxy([ route("app.localhost", 1) ])
     res = http(port, "app.localhost", headers: { "x-portless-hops" => "5" })
