@@ -1554,7 +1554,7 @@ describe "createProxyServer with TLS (HTTP/2)" do
       # A plain HTTP server on the port: answers the ClientHello with a 400
       # (Node's clientError), or destroys the socket once `reset` is set.
       plain = listen_backend(port: port, raw: lambda do |socket|
-        socket.read(1)
+        socket.readpartial(16_384) # the whole ClientHello, so close() sends FIN, not RST
         socket.write("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n") unless reset
         reset ? reset_and_destroy(socket) : socket.close
       end)

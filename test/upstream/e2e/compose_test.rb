@@ -77,6 +77,7 @@ describe "compose" do
 
   before do
     skip "Docker is not available" unless ComposeE2E.docker?
+    skip "upstream fixtures missing (clone references/portless)" unless Dir.exist?(ComposeE2E.cwd)
     up = ComposeE2E.setup!
     _(up[:status]).must_equal 0, up[:stdout] + up[:stderr]
   end

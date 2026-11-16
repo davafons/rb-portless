@@ -126,9 +126,21 @@ describe "upstream dialing" do
     running = ProxyTestSupport::RunningProxy.new(routes: [ route("myapp.localhost", 19_877) ])
     on_cleanup { running.close }
     proxy_port = running.listen_port
-    responses = Array.new(9) do
+    # Send all nine requests first, as Node's http.get has before vi.waitFor
+    # yields; a thread still connecting when the proxy closes would see a
+    # different error than the reset.
+    sockets = Array.new(9) do
+      TCPSocket.new("127.0.0.1", proxy_port).tap do |s|
+        s.write("GET / HTTP/1.1\r\nhost: myapp.localhost\r\nconnection: close\r\n\r\n")
+      end
+    end
+    on_cleanup { sockets.each { |s| s.close rescue nil } }
+    responses = sockets.map do |socket|
       Thread.new do
-        get_status(proxy_port)
+        line = socket.gets
+        raise EOFError if line.nil?
+
+        line.split[1].to_i
       rescue Errno::ECONNRESET, EOFError
         "ECONNRESET"
       end
