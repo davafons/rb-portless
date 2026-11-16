@@ -1,0 +1,12 @@
+# Scenarios where rb-portless output differs from upstream on purpose (the
+# deliberate divergences and async-http limits in AGENTS.md). run.rb fails on
+# any other difference, and on an entry here that no longer differs.
+"help: doctor --help": doctor checks the Ruby runtime where upstream checks Node.js
+"help: clean --help": the legacy /tmp system state dir is not ported, so clean does not mention it
+"usage: --version extra": version has the fourth segment (0.17.0.0)
+"no proxy: doctor --json": fourth version segment; rubyVersion and "Ruby" instead of Node.js
+"proxy: doctor --json": fourth version segment; rubyVersion and "Ruby" instead of Node.js
+"tls: doctor --json": fourth version segment; rubyVersion and "Ruby" instead of Node.js
+"http: echo proxied request": async-http frames a bodiless request to the backend with content-length 0
+"http: echo with port in Host": async-http frames a bodiless request to the backend with content-length 0
+"tls: run env": the child also gets SSL_CERT_FILE (Ruby analogue of NODE_EXTRA_CA_CERTS)

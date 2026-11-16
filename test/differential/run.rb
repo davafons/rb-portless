@@ -9,7 +9,8 @@
 # Safe by construction: plain-HTTP proxies on one high port (the tools run
 # one after the other), PORTLESS_SYNC_HOSTS=0, isolated PORTLESS_STATE_DIRs,
 # and only --help for anything that touches trust, hosts, services or state.
-# Exit status: 0 when no differences, 1 otherwise.
+# Exit status: 0 when every difference is listed in expected.yml (the
+# deliberate divergences) and every listed one still differs, 1 otherwise.
 
 require "open3"
 require "json"
@@ -19,6 +20,7 @@ require "tmpdir"
 require "fileutils"
 require "optparse"
 require "openssl"
+require "yaml"
 
 ROOT = File.expand_path("../..", __dir__)
 
@@ -368,7 +370,9 @@ begin
   warn "proxy port #{PROXY_PORT}; upstream state #{UPSTREAM.state_dir}; rb state #{OURS.state_dir}"
   up = collect(UPSTREAM, opts[:only])
   rb = collect(OURS, opts[:only])
+  expected = YAML.safe_load_file(File.join(__dir__, "expected.yml"))
   diffs = 0
+  unexpected = []
   (up.keys | rb.keys).each do |name|
     a = normalize_result(UPSTREAM, up[name] || {})
     b = normalize_result(OURS, rb[name] || {})
@@ -377,7 +381,13 @@ begin
       next
     end
     diffs += 1
-    puts "DIFF  #{name}"
+    if expected.key?(name)
+      puts "KNOWN #{name} (#{expected[name]})"
+      next unless opts[:verbose]
+    else
+      unexpected << name
+      puts "DIFF  #{name}"
+    end
     (a.keys | b.keys).each do |field|
       next if a[field] == b[field]
 
@@ -391,8 +401,10 @@ begin
     end
   end
   total = (up.keys | rb.keys).size
-  puts "\n#{diffs} of #{total} scenarios differ"
-  exit(diffs.zero? ? 0 : 1)
+  stale = opts[:only] ? [] : expected.keys.select { |name| up.key?(name) && normalize_result(UPSTREAM, up[name]) == normalize_result(OURS, rb[name]) }
+  stale.each { |name| puts "STALE #{name}: matches upstream now; remove it from expected.yml" }
+  puts "\n#{diffs} of #{total} scenarios differ (#{diffs - unexpected.size} known, #{unexpected.size} unexpected)"
+  exit(unexpected.empty? && stale.empty? ? 0 : 1)
 ensure
   UPSTREAM.cleanup
   OURS.cleanup

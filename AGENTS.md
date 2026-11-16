@@ -97,7 +97,11 @@ bundle, keychain safety, our e2e harness) stay in `test/*_test.rb`.
   (`script/upstream/map.yml`), tests added/removed since `script/upstream/PIN`
   (`rake upstream:sync`). Its header lists the release workflow; `--bump ref` moves PIN once
   the mirror matches.
-- `test/differential/run.rb` — same commands against both CLIs, output diffed.
+- `test/differential/run.rb` — same commands against both CLIs, output diffed; differences
+  must be listed with a reason in `test/differential/expected.yml` (deliberate divergences only).
+- CI (`.github/workflows/ci.yml`): the suite on Linux + macOS × Ruby 3.3/3.4/4.0, rubocop, and an
+  `upstream` job that checks out upstream at `PIN`, builds it, and runs the mirror check, the
+  upstream e2e suite (frameworks, compose) and the differential check.
 
 ## Module map (`lib/portless/`)
 

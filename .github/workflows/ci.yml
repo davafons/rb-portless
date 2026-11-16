@@ -20,7 +20,54 @@ jobs:
         with:
           ruby-version: ${{ matrix.ruby }}
           bundler-cache: true
-      - run: bundle exec rake test
+      # Every test file in its own process. Tests that need the upstream clone
+      # (framework e2e, compose) skip here; the upstream job runs them.
+      - run: bundle exec script/test_parallel
+        env:
+          JOBS: "3"
+
+  # Upstream's checks against upstream itself, at the commit we match
+  # (script/upstream/PIN): the test-mirror check, its e2e suite (real Vite,
+  # Next, Astro, ... apps and Docker Compose behind rb-portless), and the
+  # differential run of the same commands through both CLIs.
+  upstream:
+    name: Upstream parity (e2e, test mirror, differential)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: pin
+        run: echo "sha=$(cat script/upstream/PIN)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          repository: vercel-labs/portless
+          ref: ${{ steps.pin.outputs.sha }}
+          path: references/portless
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: references/portless/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: references/portless/.node-version
+          cache: pnpm
+          cache-dependency-path: references/portless/pnpm-lock.yaml
+      - name: Install and build upstream
+        working-directory: references/portless
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm --filter portless build
+          pnpm --dir tests/e2e setup:python
+      - name: Test mirror matches upstream
+        run: bundle exec script/upstream/check_tests
+      - name: Upstream e2e suite against rb-portless
+        run: bundle exec script/test_parallel test/upstream/e2e
+        env:
+          JOBS: "2"
+      - name: Differential check against upstream portless
+        run: bundle exec ruby test/differential/run.rb
 
   lint:
     runs-on: ubuntu-latest
