@@ -108,11 +108,6 @@ module Portless
         { dns_name: dns_name, base_url: "https://#{dns_name}" }
       end
 
-      # Contract alias: readiness check before the proxy starts.
-      def check!(funnel: false, runner: method(:default_runner))
-        ensure_ready!(require_funnel: funnel, require_https: true, runner: runner)
-      end
-
       # HTTPS ports in use by serve/funnel, incl. Foreground sessions (#499).
       def used_serve_ports(runner = method(:default_runner))
         result = runner.call([ "serve", "status", "--json" ])
@@ -211,11 +206,6 @@ module Portless
         raise Error, "Failed to remove tailscale #{mode} on port #{https_port}: " \
                      "#{details.empty? ? 'unknown tailscale error' : details}"
       end
-
-      def register_serve(local_port, https_port, runner: method(:default_runner)) = register("serve", local_port, https_port, runner)
-      def register_funnel(local_port, https_port, runner: method(:default_runner)) = register("funnel", local_port, https_port, runner)
-      def unregister_serve(https_port, **opts) = unregister("serve", https_port, **opts)
-      def unregister_funnel(https_port, **opts) = unregister("funnel", https_port, **opts)
 
       # Best-effort teardown from route metadata — only the registration that
       # was recorded (tailscaleHttpsPort + tailscaleFunnel). Accepts a route

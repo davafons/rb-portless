@@ -85,14 +85,6 @@ class ServiceTest < Minitest::Test
     assert_equal "/Users/dev/.rb-portless", config[:state_dir]
   end
 
-  def test_install_keywords_map_to_flags
-    seen = nil
-    S.stub(:install_from_args, ->(args) { seen = args }) do
-      S.install(port: 8443, no_tls: true, tlds: %w[a b], wildcard: true, state_dir: "/s")
-    end
-    assert_equal %w[service install --port 8443 --no-tls --tld a --tld b --wildcard --state-dir /s], seen
-  end
-
   def test_parse_quoted_words
     assert_equal [ "a b", 'c"d', "e\\f" ], S.parse_quoted_words('"a b" "c\\"d" e\\\\f')
   end

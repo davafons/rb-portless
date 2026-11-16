@@ -10,7 +10,7 @@ class DaemonServerTest < Minitest::Test
 
   class FakeProxy
     class << self
-      attr_accessor :last
+      attr_accessor :last, :before_listening
     end
     attr_reader :opts
 
@@ -21,6 +21,7 @@ class DaemonServerTest < Minitest::Test
     end
 
     def run
+      self.class.before_listening&.call(@opts)
       @opts[:on_listening].call
       @stopped.pop
     end
@@ -50,7 +51,7 @@ class DaemonServerTest < Minitest::Test
     @synced = []
     synced = @synced
     @hosts_stubs = {
-      should_auto_sync?: ->(v) { v != "0" && v != "false" },
+      should_auto_sync_hosts?: ->(v) { v != "0" && v != "false" },
       sync_hosts_file: ->(names) { synced << names; true },
       clean_hosts_file: -> { synced << :clean; true }
     }
@@ -99,9 +100,32 @@ class DaemonServerTest < Minitest::Test
       block.call(FakeProxy.last)
       FakeProxy.last.stop
       thread.join(5)
+      thread.value
     end
   ensure
     FakeProxy.last = nil
+    FakeProxy.before_listening = nil
+  end
+
+  # cli.ts prints the banner synchronously, then each listener's line as it
+  # binds: the extra targets, the :80 redirects, the primary last.
+  def test_startup_output_order_and_auxiliary_listeners
+    FakeProxy.before_listening = lambda do |opts|
+      opts[:on_auxiliary_listen].call(:proxy, "::1", 1355, nil)
+      opts[:on_auxiliary_listen].call(:proxy, "::1", 1355, Errno::EADDRNOTAVAIL.new)
+      opts[:on_auxiliary_listen].call(:proxy, "0.0.0.0", 1355, Errno::EADDRINUSE.new)
+      opts[:on_auxiliary_listen].call(:redirect, "127.0.0.1", 80, nil)
+      opts[:on_auxiliary_listen].call(:redirect, "::1", 80, Errno::EACCES.new)
+    end
+    stdout, stderr = run_server { |_proxy| nil }
+    lines = stdout.lines.map(&:chomp).reject(&:empty?)
+    assert_equal [ "Proxy is running. Press Ctrl+C to stop.", "Routes file: #{File.join(@dir, 'routes.json')}",
+                   "HTTP proxy listening on [::1]:1355 (TLDs: .test) (wildcard)",
+                   "HTTP-to-HTTPS redirect listening on 127.0.0.1:80",
+                   "HTTP proxy listening on 127.0.0.1:1355 (TLDs: .test) (wildcard)" ], lines
+    assert_includes stderr, "Could not listen on 0.0.0.0:1355: Address already in use"
+    refute_includes stderr, "[::1]"
+    refute_includes stderr, ":80"
   end
 
   def test_writes_markers_while_listening_and_resets_them_on_exit
@@ -136,7 +160,8 @@ class DaemonServerTest < Minitest::Test
   def test_unprivileged_never_syncs_hosts_and_is_loopback_only
     run_server(unprivileged: true) do |proxy|
       assert proxy.opts[:loopback_only]
-      assert proxy.opts[:lan_bind], "binds the wildcard address to get the port"
+      assert_equal %w[0.0.0.0 ::], proxy.opts[:bind_targets].map { |t| t[:host] },
+                   "binds the wildcard address to get the port"
       assert_equal :disabled, proxy.opts[:on_hosts_sync_request].call
       assert File.exist?(File.join(@dir, "proxy.unprivileged"))
     end

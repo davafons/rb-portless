@@ -278,8 +278,14 @@ module Portless
 
         raise ConfigValidationError, "\"#{key.(k)}\" in #{path} must be a non-empty string."
       end
-      if obj.key?("appPort") && !(obj["appPort"].is_a?(Integer) && obj["appPort"].between?(1, 65_535))
-        raise ConfigValidationError, "\"#{key.('appPort')}\" in #{path} must be an integer between 1 and 65535."
+      if obj.key?("appPort")
+        # Number.isInteger: JSON 3000.0 / 3e3 are integers too.
+        port = obj["appPort"]
+        unless port.is_a?(Numeric) && port.finite? && port == port.to_i && port.between?(1, 65_535)
+          raise ConfigValidationError, "\"#{key.('appPort')}\" in #{path} must be an integer between 1 and 65535."
+        end
+
+        obj["appPort"] = port.to_i
       end
       return unless obj.key?("proxy") && ![ true, false ].include?(obj["proxy"])
 

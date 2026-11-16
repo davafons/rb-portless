@@ -7,14 +7,6 @@ module Portless
   class Runner
     EXIT_TIMEOUT = 2.0
 
-    # Shareable process tunnels (PROCESS_TUNNELS): provider key, label, env
-    # flag, route url/pid fields.
-    def self.process_tunnels
-      Tunnel::PROCESS_TUNNELS.map do |t|
-        t.merge(provider: t[:name])
-      end
-    end
-
     AutoInfo = Struct.new(:name_source, :base_name, :prefix, :prefix_source, keyword_init: true)
 
     def self.build_hostnames(name, tlds, target_tlds = nil)
@@ -43,6 +35,26 @@ module Portless
       end
       killed.uniq
     end
+
+    # Self-daemonizing command: its launcher exited but a listener remains on
+    # the port — hand the routes to that pid (issue #411).
+    def self.transfer_routes_to_daemon(store, hostnames, port, group_id, preexisting, exited_cleanly)
+      listener = ProcessGroup.find_self_daemonized_listener(port, group_id, EXIT_TIMEOUT, exited_cleanly)
+      return if listener.nil? || listener == preexisting
+
+      transferred = hostnames.map do |h|
+        store.transfer_route(h, Process.pid, listener)
+      rescue StandardError
+        false
+      end.any?
+      return unless transferred
+
+      warn Colors.yellow("Command exited but PID #{listener} is still serving port #{port}. Keeping " \
+                         "#{hostnames.first} routed to it. Stop it with: kill #{listener}", io: $stderr)
+    end
+
+    # PID already listening on a port before a command is spawned, if any.
+    def self.find_preexisting_listener(port) = PortOwner.port_listening?(port) ? PortOwner.pid_on_port(port) : nil
 
     def self.remove_routes(store, hostnames, owner_pid = nil)
       hostnames.each do |h|
@@ -75,7 +87,7 @@ module Portless
 
       wants_funnel = Utils.env_enabled?("PORTLESS_FUNNEL")
       wants_tailscale = wants_funnel || Utils.env_enabled?("PORTLESS_TAILSCALE")
-      tunnels = self.class.process_tunnels.select { |t| Utils.env_enabled?(t[:env]) }
+      tunnels = Tunnel::PROCESS_TUNNELS.select { |t| Utils.env_enabled?(t[:env]) }
 
       # Readiness before auto-starting the proxy: no point starting it if a
       # share will fail afterwards.
@@ -83,7 +95,7 @@ module Portless
       return 1 if wants_tailscale && ts_base_url.nil?
 
       tunnels.each do |t|
-        Tunnel.check!(t[:provider])
+        Tunnel.check!(t[:name])
       rescue Error => e
         warn Colors.red("Error: #{e.message}", io: $stderr)
         Tunnel.print_hint(t, e.message)
@@ -94,14 +106,14 @@ module Portless
       self.class.build_hostnames(@name, @tlds) # validate before auto-starting the proxy
       result = Daemon.ensure_proxy_running(@proxy_port, @tls, desired)
       if result[:started]
-        state = CLI.state_struct(result[:state])
+        state = result[:state]
         @proxy_port = state.port
         @state_dir = state.dir
         @tlds = state.tlds
         @tls = state.tls
         @lan_mode = state.lan_mode
         @lan_ip = state.lan_ip
-        @store = RouteStore.new(@state_dir, on_warning: ->(msg) { warn Colors.yellow(msg, io: $stderr) })
+        @store = Utils.new_route_store(@state_dir)
         @store.recover_corrupt_routes_file
         CLI.handle_trust if @tls && !Trust.trusted?(@state_dir)
       else
@@ -130,13 +142,13 @@ module Portless
       end
 
       port = @desired_port || FreePort.find
-      warn(@desired_port ? "  Using port #{port} (fixed)" : "  Using port #{port}")
+      warn Colors.green(@desired_port ? "  Using port #{port} (fixed)" : "  Using port #{port}", io: $stderr)
 
       stop_orphaned_process_groups
 
       begin
         killed = self.class.add_routes(@store, hostnames, port, Process.pid, @force)
-        report_hosts_sync(hostnames)
+        CLI.report_hosts_sync_here(hostnames, @proxy_port, @tls, @lan_mode)
       rescue RouteConflictError => e
         warn Colors.red("Error: #{e.message}", io: $stderr)
         return 1
@@ -147,16 +159,16 @@ module Portless
       final_url = Utils.format_url(hostname, @proxy_port, @tls)
       all_urls = hostnames.map { |h| Utils.format_url(h, @proxy_port, @tls) }
       $stderr.write(Colors.bold("\n  -> #{final_url}\n", io: $stderr), "\n")
-      all_urls.drop(1).each { |u| warn "  also -> #{u}" }
+      all_urls.drop(1).each { |u| warn Colors.cyan("  also -> #{u}", io: $stderr) }
       warn "" if all_urls.length > 1
       if @lan_ip
-        warn "  LAN -> #{final_url}"
+        warn Colors.green("  LAN -> #{final_url}", io: $stderr)
         gray.("  (accessible from other devices on the same WiFi network)\n")
       end
 
       tailscale_url = start_tailscale(hostname, port, wants_funnel, ts_base_url) if wants_tailscale
-      tunnel_urls = start_tunnels(tunnels, hostname, port)
-      return 1 if tunnel_urls.nil?
+      tunnel_runs = start_tunnels(tunnels, hostname, port)
+      return 1 if tunnel_runs.nil?
 
       framework = Frameworks.resolve_framework_basename(@command_args)
       expo_lan = framework == "expo" && (@lan_mode || Utils.lan_env_enabled?)
@@ -166,12 +178,12 @@ module Portless
       Frameworks.inject_package_script_framework_flags(@command_args, port)
       Frameworks.inject_framework_flags(@command_args, port)
 
-      ca_env = ca_env_vars
+      ca_env = RunSupport.ca_env(@state_dir, @tls)
       ca_fragment = ca_env["NODE_EXTRA_CA_CERTS"] ? " NODE_EXTRA_CA_CERTS=\"#{ca_env['NODE_EXTRA_CA_CERTS']}\"" : ""
       gray.("Running: PORT=#{port}#{host_bind ? " HOST=#{host_bind}" : ''} PORTLESS_URL=#{final_url}" \
             "#{ca_fragment} #{@command_args.join(' ')}\n")
 
-      preexisting = PortOwner.port_listening?(port) ? PortOwner.pid_on_port(port) : nil
+      preexisting = self.class.find_preexisting_listener(port)
       env = {
         "PORT" => port.to_s,
         "HOST" => host_bind,
@@ -181,7 +193,7 @@ module Portless
       env.delete("HOST") unless host_bind
       env["PORTLESS_LAN"] = "1" if @lan_mode
       env["PORTLESS_TAILSCALE_URL"] = tailscale_url if tailscale_url
-      tunnel_urls.each { |t, url| env["#{t[:env]}_URL"] = url if url }
+      tunnel_runs.each { |r| env["#{r[:t][:env]}_URL"] = r[:handle].url unless r[:handled] }
       env.merge!(ca_env)
 
       RunSupport.spawn_command(
@@ -195,52 +207,31 @@ module Portless
             nil
           end
         end,
-        on_exit: ->(pid, code) { transfer_routes_to_daemon(hostnames, port, pid, preexisting, code.zero?) },
-        on_cleanup: -> { cleanup(hostnames, wants_funnel) }
+        on_exit: lambda do |pid, code|
+          self.class.transfer_routes_to_daemon(@store, hostnames, port, pid, preexisting, code.zero?)
+        end,
+        on_signal: -> { @stopping_tunnels = true },
+        on_cleanup: -> { cleanup(hostnames) }
       )
     rescue Error => e
       # Tunnel start failures are fatal with upstream's hint.
       warn Colors.red("Error: #{e.message}", io: $stderr)
       e.hints.each { |h| warn Colors.blue(h, io: $stderr) } if e.respond_to?(:hints)
-      cleanup(@registered, wants_funnel) if @registered
+      cleanup(@registered) if @registered
       1
     end
 
     private
-
-    # Upstream sets NODE_EXTRA_CA_CERTS when TLS is on and it isn't already set;
-    # SSL_CERT_FILE (combined bundle, CaBundle) is the Ruby analogue under the
-    # same conditions.
-    def ca_env_vars
-      env = {}
-      return env unless @tls
-
-      ca_path = File.join(@state_dir, "ca.pem")
-      env["NODE_EXTRA_CA_CERTS"] = ca_path if !ENV["NODE_EXTRA_CA_CERTS"] && File.exist?(ca_path)
-      if !ENV["SSL_CERT_FILE"] && File.exist?(ca_path)
-        bundle = begin
-          CaBundle.path
-        rescue StandardError
-          nil
-        end
-        env["SSL_CERT_FILE"] = bundle if bundle
-      end
-      env
-    end
-
-    def report_hosts_sync(hostnames)
-      Daemon.report_hosts_sync(hostnames, @proxy_port, @tls, @lan_mode) { |msg| warn Colors.yellow(msg, io: $stderr) }
-    end
 
     def ensure_tailscale_ready(funnel)
       Share::Tailscale.ensure_ready!(require_funnel: funnel, require_https: true)[:base_url]
     rescue Error => e
       warn Colors.red("Error: #{e.message}", io: $stderr)
       if e.message.include?("not found")
-        warn "Install Tailscale: https://tailscale.com/download"
+        warn Colors.blue("Install Tailscale: https://tailscale.com/download", io: $stderr)
       elsif !e.message.include?("not enabled on your tailnet")
-        warn "Make sure Tailscale is connected:"
-        warn "  tailscale up"
+        warn Colors.blue("Make sure Tailscale is connected:", io: $stderr)
+        warn Colors.cyan("  tailscale up", io: $stderr)
       end
       nil
     end
@@ -248,7 +239,7 @@ module Portless
     def start_tailscale(hostname, port, funnel, base_url)
       @tailscale = Share::Tailscale.start(app_port: port, funnel: funnel, base_url: base_url)
       label = funnel ? "Funnel (public)" : "Tailscale"
-      warn "  #{label} -> #{@tailscale.url}"
+      warn Colors.green("  #{label} -> #{@tailscale.url}", io: $stderr)
       $stderr.write(Colors.gray(funnel ? "  (accessible from the public internet via Tailscale Funnel)\n" \
                                        : "  (accessible from your tailnet)\n", io: $stderr), "\n")
       begin
@@ -260,33 +251,51 @@ module Portless
       @tailscale.url
     end
 
-    # => [[tunnel, url], ...] or nil after a fatal start failure.
+    # => [{t:, handle:, handled:}, ...] or nil after a fatal start failure. An
+    # exit reported before the route records the URL is replayed once it has.
     def start_tunnels(tunnels, hostname, port)
       @tunnel_handles = []
+      @tunnel_mutex = Mutex.new
       tunnels.map do |t|
-        handle = Tunnel.start(t[:provider], app_port: port, host: hostname, state_dir: @state_dir) do |code, signal|
-          tunnel_exited(t, hostname, code, signal)
+        run = { t: t, ready: false }
+        handle = Tunnel.start(t[:name], app_port: port, host: hostname, state_dir: @state_dir) do |code, signal|
+          tunnel_exited(run, hostname, code, signal)
         end
+        run[:handle] = handle
         @tunnel_handles << handle
-        warn "  #{t[:label]} -> #{handle.url}"
+        warn Colors.green("  #{t[:label]} -> #{handle.url}", io: $stderr)
         $stderr.write(Colors.gray("  (accessible from the public internet via #{t[:via]})\n", io: $stderr), "\n")
         begin
           @store.update_route(hostname, t[:url_field] => handle.url, t[:pid_field] => handle.pid)
         rescue StandardError
           nil
+        ensure
+          pending = @tunnel_mutex.synchronize do
+            run[:ready] = true
+            run.delete(:pending)
+          end
+          pending&.call
         end
-        [ t, handle.url ]
+        run
       rescue Error => e
         warn Colors.red("Error: #{e.message}", io: $stderr)
         Tunnel.print_hint(t, e.message)
-        cleanup(@registered, nil)
+        cleanup(@registered)
         return nil
       end
     end
 
-    def tunnel_exited(t, hostname, code, signal)
-      return if @stopping_tunnels
+    def tunnel_exited(run, hostname, code, signal)
+      deferred = @tunnel_mutex.synchronize do
+        next true if @stopping_tunnels || run[:handled]
+        next run[:pending] = -> { tunnel_exited(run, hostname, code, signal) } unless run[:ready]
 
+        run[:handled] = true
+        false
+      end
+      return if deferred
+
+      t = run[:t]
       suffix = signal ? " (signal #{signal})" : (code.nil? ? "" : " (exit #{code})")
       warn Colors.yellow("Warning: #{t[:label]} tunnel for #{hostname} stopped#{suffix}. " \
                          "Removing its public URL from the route list.", io: $stderr)
@@ -295,7 +304,7 @@ module Portless
       nil
     end
 
-    def cleanup(hostnames, _funnel)
+    def cleanup(hostnames)
       @stopping_tunnels = true
       (@tunnel_handles || []).each do |h|
         h.stop
@@ -310,26 +319,9 @@ module Portless
       self.class.remove_routes(@store, hostnames || [], Process.pid)
     end
 
-    # Self-daemonizing command: its launcher exited but a listener remains on
-    # the port — hand the routes to that pid (issue #411).
-    def transfer_routes_to_daemon(hostnames, port, group_id, preexisting, exited_cleanly)
-      listener = ProcessGroup.find_self_daemonized_listener(port, group_id, EXIT_TIMEOUT, exited_cleanly)
-      return if listener.nil? || listener == preexisting
-
-      transferred = hostnames.map do |h|
-        @store.transfer_route(h, Process.pid, listener)
-      rescue StandardError
-        false
-      end.any?
-      return unless transferred
-
-      warn Colors.yellow("Command exited but PID #{listener} is still serving port #{port}. Keeping " \
-                         "#{hostnames.first} routed to it. Stop it with: kill #{listener}", io: $stderr)
-    end
-
     # Stop dev servers left by sessions that died without cleanup.
     def stop_orphaned_process_groups
-      return if @store.respond_to?(:untrusted_reason) && @store.untrusted_reason
+      return if @store.untrusted_reason
 
       orphaned = @store.find_stale_routes
       stops = CLI.stop_recorded_groups(orphaned, "TERM")
@@ -357,8 +349,6 @@ module Portless
         end
         @store.remove_stale_route(route.hostname, route.pid) if route.tailscale_https_port.nil?
       end
-    rescue StandardError
-      nil
     end
   end
 end

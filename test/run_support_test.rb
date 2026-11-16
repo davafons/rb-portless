@@ -41,6 +41,13 @@ class RunSupportTest < Minitest::Test
     end
   end
 
+  def test_on_signal_runs_when_a_forwarded_signal_arrives
+    signaled = false
+    code = R.spawn_command([ "sleep", "5" ], on_spawn: ->(_) { Process.kill("INT", Process.pid) },
+                                            on_signal: -> { signaled = true })
+    assert_equal [ 130, true ], [ code, signaled ]
+  end
+
   def test_augmented_path_prepends_node_modules_bin
     Dir.mktmpdir do |dir|
       bin = File.join(dir, "node_modules", ".bin")

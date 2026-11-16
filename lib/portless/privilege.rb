@@ -70,9 +70,6 @@ module Portless
       !can_bind_proxy_port?(port, bind_targets(lan_bind))
     end
 
-    # Kept for callers that only know the port.
-    def needs_sudo?(port) = needs_elevation?(port, false)
-
     # Can we bind `port` without root on this platform? cli-utils.ts
     # canBindWithoutRoot. → {ok: true} | {ok: false, reason:}
     def can_bind_without_root(port, platform: host_platform,
@@ -113,22 +110,30 @@ module Portless
          .map { |k, v| "#{k}=#{v}" }
     end
 
-    # Run `sudo env PORTLESS_*… ruby <cli> *args` with inherited stdio.
-    # Returns the Process::Status (or nil when sudo couldn't be spawned).
-    def sudo(args, timeout: SUDO_SPAWN_TIMEOUT)
-      pid = Process.spawn("sudo", "env", *portless_env_args, *cli_argv, *args)
-      timeout ? wait_with_timeout(pid, timeout) : Process.wait2(pid).last
+    # spawnSync's result: the exit status, or the spawn error message
+    # ("spawnSync sudo ETIMEDOUT" when the timeout killed it).
+    SpawnResult = Struct.new(:status, :error) do
+      def success? = error.nil? && !!status&.success?
+    end
+
+    # spawnSync("sudo", argv, { stdio: "inherit", timeout }).
+    def run_sudo(argv, timeout: SUDO_SPAWN_TIMEOUT)
+      pid = Process.spawn("sudo", *argv)
+      timed_out = false
+      status = wait_with_timeout(pid, timeout) { timed_out = true }
+      SpawnResult.new(status, timed_out ? "spawnSync sudo ETIMEDOUT" : nil)
     rescue SystemCallError => e
-      warn e.message
-      nil
+      SpawnResult.new(nil, "spawnSync sudo #{e.class.name.split('::').last}")
     end
 
-    # Back-compat boolean wrapper.
-    def reexec_with_sudo(args)
-      status = sudo(args)
-      status&.success? || false
+    # `sudo env PORTLESS_*… ruby <cli> *args` with inherited stdio.
+    def sudo(args, timeout: SUDO_SPAWN_TIMEOUT)
+      run_sudo([ "env", *portless_env_args, *cli_argv, *args ], timeout: timeout)
     end
 
+    def reexec_with_sudo(args) = sudo(args).success?
+
+    # Wait for pid; past the timeout SIGTERM it (yielding first) and reap it.
     def wait_with_timeout(pid, timeout)
       deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
       loop do
@@ -136,6 +141,7 @@ module Portless
         return status if status
 
         if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
+          yield if block_given?
           Process.kill("TERM", pid) rescue nil # rubocop:disable Style/RescueModifier
           _, status = Process.wait2(pid)
           return status
@@ -152,7 +158,5 @@ module Portless
     def cli_argv = [ RbConfig.ruby, "-I", lib_dir, program ]
 
     def lib_dir = File.expand_path("..", __dir__)
-
-    def truthy(value) = %w[1 true].include?(value.to_s.downcase)
   end
 end

@@ -39,6 +39,9 @@ module Portless
     MAX_CN_LENGTH = 64
 
     class << self
+      # certs.ts fileExists: present and readable by this process.
+      def file_exists?(path) = File.readable?(path)
+
       # Ensure a CA and the default server cert exist in `state_dir`. The CA is
       # regenerated when missing, expiring, SHA-1 signed or carrying duplicate
       # extensions; the server cert additionally when it lacks the *.local SAN.
@@ -49,13 +52,13 @@ module Portless
         server_key_path = File.join(state_dir, SERVER_KEY_FILE)
 
         ca_generated = false
-        if !File.exist?(ca_cert_path) || !File.exist?(ca_key_path) || !cert_valid?(ca_cert_path) ||
+        if !file_exists?(ca_cert_path) || !file_exists?(ca_key_path) || !cert_valid?(ca_cert_path) ||
            !cert_signature_strong?(ca_cert_path) || duplicate_extensions?(ca_cert_path)
           generate_ca(state_dir)
           ca_generated = true
         end
 
-        if ca_generated || !File.exist?(server_cert_path) || !File.exist?(server_key_path) ||
+        if ca_generated || !file_exists?(server_cert_path) || !file_exists?(server_key_path) ||
            !cert_valid?(server_cert_path) || !cert_signature_strong?(server_cert_path) ||
            !cert_sans_complete?(server_cert_path)
           generate_server_cert(state_dir)
@@ -123,7 +126,6 @@ module Portless
       end
 
       def generate_ca(state_dir)
-        FileUtils.mkdir_p(state_dir, mode: 0o755)
         key_path = File.join(state_dir, CA_KEY_FILE)
         cert_path = File.join(state_dir, CA_CERT_FILE)
 
@@ -244,8 +246,6 @@ module Portless
     # The SNI selector (createSNICallback). Memory cache → valid on-disk cert →
     # one deduplicated generation per hostname.
     class SNI
-      attr_reader :default_context
-
       def initialize(state_dir, default_cert, default_key, tlds, ca_cert)
         @state_dir = state_dir
         @tlds = tlds
@@ -280,7 +280,7 @@ module Portless
         host_dir = File.join(@state_dir, HOST_CERTS_DIR)
         cert_path = File.join(host_dir, "#{safe}.pem")
         key_path = File.join(host_dir, "#{safe}-key.pem")
-        return nil unless File.exist?(cert_path) && File.exist?(key_path) &&
+        return nil unless Certs.file_exists?(cert_path) && Certs.file_exists?(key_path) &&
                           Certs.cert_valid?(cert_path) && Certs.cert_signature_strong?(cert_path) &&
                           !Certs.tld_wildcard_san?(cert_path)
 
@@ -344,7 +344,7 @@ module Portless
     end
 
     # ---------------------------------------------------------------------
-    # Instance API used by trust.rb (CA fingerprint / generation on demand).
+    # Instance API: CA generation on demand.
 
     def initialize(state_dir = nil)
       @state_dir = state_dir
@@ -355,25 +355,13 @@ module Portless
     def ensure_ca!
       ca_cert_path = File.join(state_dir, CA_CERT_FILE)
       ca_key_path = File.join(state_dir, CA_KEY_FILE)
-      return if File.exist?(ca_cert_path) && File.exist?(ca_key_path) && self.class.cert_valid?(ca_cert_path) &&
+      return if self.class.file_exists?(ca_cert_path) && self.class.file_exists?(ca_key_path) &&
+                self.class.cert_valid?(ca_cert_path) &&
                 self.class.cert_signature_strong?(ca_cert_path) && !self.class.duplicate_extensions?(ca_cert_path)
 
       self.class.generate_ca(state_dir)
     end
 
     def ensure_certs = self.class.ensure_certs(state_dir)
-
-    def ca_certificate
-      ensure_ca!
-      OpenSSL::X509::Certificate.new(File.read(File.join(state_dir, CA_CERT_FILE)))
-    end
-
-    def ca_key
-      ensure_ca!
-      OpenSSL::PKey.read(File.read(File.join(state_dir, CA_KEY_FILE)))
-    end
-
-    # SHA-256 fingerprint — used by the trust marker + OS trust check.
-    def ca_fingerprint = OpenSSL::Digest::SHA256.hexdigest(ca_certificate.to_der)
   end
 end

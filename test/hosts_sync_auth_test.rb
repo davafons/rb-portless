@@ -15,7 +15,7 @@ class HostsSyncAuthTest < Minitest::Test
   def test_creates_private_state_and_rotates
     token = A.generate_token
     assert A.write_token(@dir, token)
-    path = File.join(@dir, A::FILE)
+    path = File.join(@dir, A::HOSTS_SYNC_AUTH_FILE)
     assert_equal 0o600, File.stat(path).mode & 0o777
     assert_equal token, A.read_token(@dir)
     other = A.generate_token
@@ -25,7 +25,7 @@ class HostsSyncAuthTest < Minitest::Test
 
   def test_rejects_malformed_tokens
     refute A.write_token(@dir, "nope")
-    File.write(File.join(@dir, A::FILE), "zz")
+    File.write(File.join(@dir, A::HOSTS_SYNC_AUTH_FILE), "zz")
     assert_nil A.read_token(@dir)
   end
 

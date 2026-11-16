@@ -46,4 +46,36 @@ class PrivilegeTest < Minitest::Test
     assert_equal "-I", argv[1]
     assert File.exist?(File.join(argv[2], "rb-portless.rb"))
   end
+
+  # A fake sudo on PATH that records its argv and runs `body`.
+  def with_fake_sudo(body)
+    Dir.mktmpdir do |bin|
+      log = File.join(bin, "argv")
+      File.write(File.join(bin, "sudo"), "#!/bin/sh\nprintf '%s\\n' \"$@\" > #{log}\n#{body}\n")
+      File.chmod(0o755, File.join(bin, "sudo"))
+      path = ENV["PATH"]
+      ENV["PATH"] = "#{bin}#{File::PATH_SEPARATOR}#{path}"
+      yield -> { File.exist?(log) ? File.read(log).split("\n") : nil }
+    ensure
+      ENV["PATH"] = path
+    end
+  end
+
+  def test_run_sudo_passes_argv_once_and_reports_status
+    with_fake_sudo("exit 0") do |argv|
+      assert P.run_sudo(%w[env A=1 ruby x service uninstall]).success?
+      assert_equal %w[env A=1 ruby x service uninstall], argv.call
+    end
+    result = P.run_sudo(%w[true]) # the refusing test shim
+    refute result.success?
+    assert_equal 1, result.status.exitstatus
+  end
+
+  def test_run_sudo_timeout_matches_spawn_sync_error
+    with_fake_sudo("exec sleep 5") do
+      result = P.run_sudo(%w[x], timeout: 0.2)
+      refute result.success?
+      assert_equal "spawnSync sudo ETIMEDOUT", result.error
+    end
+  end
 end

@@ -128,7 +128,7 @@ module Portless
       return expand_segments(File.join(base, current), rest) unless current.include?("*")
 
       matched = Dir.children(base).select do |e|
-        File.directory?(File.join(base, e)) && segment_matches?(current, e)
+        File.lstat(File.join(base, e)).directory? && segment_matches?(current, e)
       end
       matched.flat_map do |e|
         rest.empty? ? [ File.join(base, e) ] : expand_segments(File.join(base, e), rest)

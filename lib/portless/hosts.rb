@@ -67,7 +67,6 @@ module Portless
 
     # Disabled only when PORTLESS_SYNC_HOSTS is "0" or "false" (opt-out).
     def should_auto_sync_hosts?(value) = value != "0" && value != "false"
-    def should_auto_sync?(value) = should_auto_sync_hosts?(value)
 
     # Whether the managed block is exactly these hostnames, each on loopback.
     def block_matches_hostnames?(content, hostnames)
@@ -123,8 +122,6 @@ module Portless
 
       extract_managed_block(content).flat_map { |line| line.split("#", 2).first.strip.split(/\s+/).drop(1) }
     end
-
-    def managed_hostnames = get_managed_hostnames
 
     # Whether the system resolver picks an address where the local proxy listens.
     def check_host_resolution(hostname)

@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 require "json"
-require "ipaddr"
+require "resolv"
 
 module Portless
   # Command dispatch. Mirrors portless's cli.ts main(): global flags
@@ -13,10 +13,8 @@ module Portless
   class CLI
     include Help
 
-    INTERNAL_LAN_IP_FLAG = "--lan-ip-auto"
-    INTERNAL_LAN_IP_ENV = "PORTLESS_INTERNAL_LAN_IP"
     GLOBAL_BOOLEAN_FLAGS = %w[--lan --tailscale --funnel --ngrok --cloudflare].freeze
-    GLOBAL_VALUE_FLAGS = [ "--ip", INTERNAL_LAN_IP_FLAG, "--script" ].freeze
+    GLOBAL_VALUE_FLAGS = [ "--ip", Daemon::INTERNAL_LAN_IP_FLAG, "--script" ].freeze
 
     RUN_FLAG_SPEC = {
       "--name" => :value, "--prefix" => :text, "--force" => :boolean, "--app-port" => :value,
@@ -42,17 +40,6 @@ module Portless
       end
     end
 
-    ProxyState = Struct.new(:dir, :port, :tls, :tld, :tlds, :lan_mode, :lan_ip, keyword_init: true)
-
-    # Daemon.discover_state (discoverState) as a struct with readers.
-    def self.discover_state = state_struct(Daemon.discover_state)
-
-    def self.state_struct(hash)
-      return hash unless hash.is_a?(Hash)
-
-      ProxyState.new(**hash.slice(*ProxyState.members))
-    end
-
     ParsedRunArgs = Struct.new(:force, :app_port, :name, :prefix, :command_args, keyword_init: true)
 
     def self.start(argv = ARGV)
@@ -72,9 +59,8 @@ module Portless
       warn Colors.red("Error: #{e.message}", io: $stderr)
       e.hints.each { |hint| warn Colors.blue(hint, io: $stderr) }
       2
-    rescue Error => e
+    rescue StandardError => e
       warn "#{Colors.red('Error:', io: $stderr)} #{e.message}"
-      e.hints.each { |hint| warn Colors.blue(hint, io: $stderr) } if e.respond_to?(:hints)
       1
     end
 
@@ -99,7 +85,7 @@ module Portless
         script_args = args[0] == "--" ? args[1..] : []
         app_config = Config.load_app_config
         script_name = global_script || app_config&.dig("script") || "dev"
-        forwarded = forward_script_extra_args(script_name, Dir.pwd, script_args)
+        forwarded = CLI.forward_script_extra_args(script_name, Dir.pwd, script_args)
         resolved = Config.resolve_script_command(script_name, Dir.pwd, forwarded)
         return RunSupport.spawn_command(resolved) if resolved
 
@@ -230,10 +216,10 @@ module Portless
         ENV["PORTLESS_LAN"] = "1"
       end
 
-      auto_ip = strip_global_flag(args, INTERNAL_LAN_IP_FLAG, true)
-      raise UsageError, "#{INTERNAL_LAN_IP_FLAG} requires an IP address." if auto_ip == false
+      auto_ip = strip_global_flag(args, Daemon::INTERNAL_LAN_IP_FLAG, true)
+      raise UsageError, "#{Daemon::INTERNAL_LAN_IP_FLAG} requires an IP address." if auto_ip == false
       if auto_ip.is_a?(String)
-        ENV[INTERNAL_LAN_IP_ENV] = auto_ip
+        ENV[Daemon::INTERNAL_LAN_IP_ENV] = auto_ip
         ENV["PORTLESS_LAN"] = "1"
       end
 
@@ -251,11 +237,9 @@ module Portless
       @global_script = script.is_a?(String) ? script : nil
     end
 
+    # Node's net.isIP: dotted-quad IPv4 or IPv6 (optional %zone), nothing else.
     def ip_address?(value)
-      IPAddr.new(value)
-      !value.include?("/")
-    rescue IPAddr::Error
-      false
+      value.match?(Resolv::IPv4::Regex) || value.sub(/%[0-9a-zA-Z\-.:]+\z/, "").match?(Resolv::IPv6::Regex)
     end
 
     # ── run / named mode argument parsing ─────────────────────────────────
@@ -265,7 +249,7 @@ module Portless
       Utils.parse_port(value) or raise UsageError, "Invalid app port \"#{value}\". Must be 1-65535."
     end
 
-    def app_port_from_env
+    def self.app_port_from_env
       value = ENV["PORTLESS_APP_PORT"]
       return nil if value.nil? || value.empty?
 
@@ -303,7 +287,7 @@ module Portless
         else enable_sharing_flag(flag)
         end
       end
-      parsed.app_port ||= app_port_from_env
+      parsed.app_port ||= CLI.app_port_from_env
       parsed
     end
 
@@ -326,7 +310,7 @@ module Portless
         command_args = Args.visit_leading_flags("", command_args, APP_FLAG_SPEC, &read_flag)
       end
       parsed.command_args = command_args
-      parsed.app_port ||= app_port_from_env
+      parsed.app_port ||= CLI.app_port_from_env
       parsed
     end
 
@@ -341,15 +325,11 @@ module Portless
       [ words[0], words.length > 1 ]
     end
 
-    def truncate_name(name) = name.split(".", -1).map { |l| Auto.truncate_label(l) }.join(".")
-
-    def new_store(dir)
-      RouteStore.new(dir, on_warning: ->(msg) { warn Colors.yellow(msg, io: $stderr) })
-    end
+    def self.truncate_name(name) = name.split(".", -1).map { |l| Auto.truncate_label(l) }.join(".")
 
     def run_app(name:, command_args:, force:, auto_info:, desired_port:)
-      state = CLI.discover_state
-      Runner.new(store: new_store(state.dir), proxy_port: state.port, state_dir: state.dir, name: name,
+      state = Daemon.discover_state
+      Runner.new(store: Utils.new_route_store(state.dir), proxy_port: state.port, state_dir: state.dir, name: name,
                  command_args: command_args, tls: state.tls, tlds: state.tlds, force: force,
                  auto_info: auto_info, desired_port: desired_port, lan_mode: state.lan_mode,
                  lan_ip: state.lan_ip).run
@@ -371,10 +351,10 @@ module Portless
       end
 
       if parsed.name
-        base_name = truncate_name(parsed.name)
+        base_name = CLI.truncate_name(parsed.name)
         name_source = "--name flag"
       elsif app_config&.dig("name")
-        base_name = truncate_name(app_config["name"])
+        base_name = CLI.truncate_name(app_config["name"])
         name_source = app_config["source"]
       else
         inferred = Auto.infer_project_name
@@ -404,7 +384,7 @@ module Portless
       raise UsageError.new("No command provided.", NAMED_USAGE) if parsed.command_args.empty?
 
       parsed.app_port ||= Config.load_app_config&.dig("appPort")
-      safe_name = truncate_name(parsed.name)
+      safe_name = CLI.truncate_name(parsed.name)
       Utils.parse_hostname(safe_name, Utils::DEFAULT_TLD)
       run_app(name: safe_name, command_args: parsed.command_args, force: parsed.force, auto_info: nil,
               desired_port: parsed.app_port)
@@ -428,7 +408,7 @@ module Portless
       handle_default_single(cwd, script_name, app_config, extra_args)
     end
 
-    def forward_script_extra_args(script_name, package_dir, extra_args)
+    def self.forward_script_extra_args(script_name, package_dir, extra_args)
       return [] if extra_args.empty?
 
       forwarding = Frameworks.resolve_script_arg_forwarding(script_name, package_dir)
@@ -452,7 +432,7 @@ module Portless
     end
 
     def handle_default_single(cwd, script_name, app_config, extra_args)
-      forwarded = forward_script_extra_args(script_name, cwd, extra_args)
+      forwarded = CLI.forward_script_extra_args(script_name, cwd, extra_args)
       resolved = Config.resolve_script_command(script_name, cwd, forwarded)
       unless resolved
         warn Colors.red("Error: No \"#{script_name}\" script found in package.json.", io: $stderr)
@@ -460,7 +440,7 @@ module Portless
       end
 
       if app_config&.dig("name")
-        base_name = truncate_name(app_config["name"])
+        base_name = CLI.truncate_name(app_config["name"])
         name_source = app_config["source"]
       else
         inferred = Auto.infer_project_name(cwd)
@@ -472,7 +452,7 @@ module Portless
       run_app(name: effective, command_args: resolved, force: false,
               auto_info: Runner::AutoInfo.new(name_source: name_source, base_name: base_name,
                                               prefix: worktree&.prefix, prefix_source: worktree&.source),
-              desired_port: app_port_from_env || app_config&.dig("appPort"))
+              desired_port: CLI.app_port_from_env || app_config&.dig("appPort"))
     end
 
     # ── get / list / alias ────────────────────────────────────────────────
@@ -488,7 +468,7 @@ module Portless
       app_config = skip ? nil : Config.load_app_config
       worktree = skip ? nil : Auto.detect_worktree_prefix(Dir.pwd, app_config&.dig("worktree", "prefix"))
       effective = Auto.apply_worktree_prefix(name, worktree, app_config&.dig("worktree", "hostnameTemplate"))
-      state = CLI.discover_state
+      state = Daemon.discover_state
       hostname = Runner.build_hostnames(effective, state.tlds).first
       url = Utils.format_url(hostname, state.port, state.tls)
       $stdout.puts(parsed.has?("--json") ? JSON.generate({ name: name, hostname: hostname, url: url }) : url)
@@ -497,8 +477,8 @@ module Portless
 
     def handle_list(args)
       json = Args.parse_command_args("list", args[1..], { "--json" => :boolean }, 0).has?("--json")
-      state = CLI.discover_state
-      list_routes(new_store(state.dir), state.port, state.tls, json)
+      state = Daemon.discover_state
+      list_routes(Utils.new_route_store(state.dir), state.port, state.tls, json)
       0
     end
 
@@ -533,14 +513,15 @@ module Portless
         endpoint = upstream ? "#{upstream[:tls] ? 'https' : 'http'}://localhost:#{r.port}" : "localhost:#{r.port}"
         label = r.pid.to_i.zero? ? "(alias)" : "(pid #{r.pid})"
         uptime = r.pid.to_i.zero? ? nil : Utils.format_uptime(r.registered_at, now)
-        puts "  #{url}  #{Colors.gray('->')}  #{endpoint}  #{Colors.gray(label)}#{uptime ? " #{Colors.gray("up #{uptime}")}" : ''}"
-        puts "    #{Colors.gray('Host:')} #{upstream[:host]}" if upstream&.dig(:host)
+        puts "  #{Colors.cyan(url)}  #{Colors.gray('->')}  #{Colors.white(endpoint)}  #{Colors.gray(label)}" \
+             "#{uptime ? " #{Colors.gray("up #{uptime}")}" : ''}"
+        puts "    #{Colors.gray('Host:')} #{Colors.white(upstream[:host])}" if upstream&.dig(:host)
         if r.tailscale_url
-          puts "    #{Colors.gray("#{r.tailscale_funnel ? 'funnel' : 'tailscale'}:")} #{r.tailscale_url}"
+          puts "    #{Colors.gray("#{r.tailscale_funnel ? 'funnel' : 'tailscale'}:")} #{Colors.green(r.tailscale_url)}"
         end
         Tunnel::PROCESS_TUNNELS.each do |t|
           url = r[t[:url_field]]
-          puts "    #{Colors.gray("#{t[:label].downcase}:")} #{url}" if url
+          puts "    #{Colors.gray("#{t[:label].downcase}:")} #{Colors.green(url)}" if url
         end
       end
       puts
@@ -612,12 +593,12 @@ module Portless
       port = alias_port ? Utils.parse_port(alias_port) : nil
       raise UsageError.new("Invalid port \"#{alias_port}\". Must be 1-65535.", usage) if !remove && port.nil?
 
-      state = CLI.discover_state
+      state = Daemon.discover_state
       if target_tlds && (unconfigured = target_tlds.find { |t| !state.tlds.include?(t) })
         warn Colors.red("Error: TLD \"#{unconfigured}\" is not configured (#{state.tlds.join(', ')}).", io: $stderr)
         return 1
       end
-      store = new_store(state.dir)
+      store = Utils.new_route_store(state.dir)
       store.recover_corrupt_routes_file
 
       if remove
@@ -636,7 +617,13 @@ module Portless
       hostnames = Runner.build_hostnames(alias_name, state.tlds, target_tlds)
       Runner.add_routes(store, hostnames, port, 0, parsed.has?("--force"), upstream)
       puts Colors.green("Alias registered: #{hostnames.join(', ')} -> 127.0.0.1:#{port}")
+      CLI.report_hosts_sync_here(hostnames, state.port, state.tls, state.lan_mode)
       0
+    end
+
+    # Warn on this terminal if a route it registered will not resolve. Issue #364.
+    def self.report_hosts_sync_here(hostnames, port, tls, lan_mode)
+      Daemon.report_hosts_sync(hostnames, port, tls, lan_mode) { |msg| warn Colors.yellow(msg, io: $stderr) }
     end
 
     # ── proxy / service / hosts ───────────────────────────────────────────
@@ -670,16 +657,8 @@ module Portless
 
       port_value = flags.value("--port") || flags.value("-p")
       port = port_value && parse_port_flag!(port_value)
-      tlds = nil
-      unless flags.values("--tld").empty?
-        begin
-          tlds = flags.values("--tld").flat_map { |v| Utils.parse_tld_list(v) }.uniq
-        rescue Error => e
-          raise UsageError.new(e.message, [ "See: rb-portless proxy start --help" ])
-        end
-      end
       result = Daemon.start(port: port, https: flags.has?("--https"), no_tls: flags.has?("--no-tls"),
-                            tlds: tlds, wildcard: flags.has?("--wildcard"),
+                            tlds: flags.values("--tld"), wildcard: flags.has?("--wildcard"),
                             unprivileged: flags.has?("--unprivileged"), cert: cert, key: key,
                             skip_trust: flags.has?("--skip-trust"), foreground: flags.has?("--foreground"))
       result.is_a?(Integer) ? result : 0
@@ -692,13 +671,6 @@ module Portless
       0
     end
 
-    def hosts_ok?
-      yield
-      true
-    rescue StandardError
-      false
-    end
-
     def handle_hosts(args)
       sub = args[1]
       return print_hosts_help unless sub
@@ -707,63 +679,69 @@ module Portless
       end
 
       Args.parse_command_args("hosts #{sub}", args[2..], {}, 0)
+      hosts_display = Hosts.hosts_display
       if sub == "clean"
-        if hosts_ok? { Hosts.clean }
-          puts Colors.green("Removed rb-portless entries from #{Hosts.file}.")
+        if Hosts.clean_hosts_file
+          puts Colors.green("Removed rb-portless entries from #{hosts_display}.")
           return 0
         end
-        return 0 if !Privilege.root? && Privilege.reexec_with_sudo(%w[hosts clean])
+        return 0 if !Privilege.root? && run_hosts_with_sudo("clean")
 
-        warn Colors.red("Failed to update #{Hosts.file}.", io: $stderr)
+        warn Colors.red("Failed to update #{hosts_display}.", io: $stderr)
         return 1
       end
 
-      state = CLI.discover_state
-      store = new_store(state.dir)
-      if store.respond_to?(:untrusted_reason) && (unsafe = store.untrusted_reason)
+      state = Daemon.discover_state
+      store = Utils.new_route_store(state.dir)
+      if (unsafe = store.untrusted_reason)
         warn Colors.red("Cannot sync hosts from routes recorded in #{state.dir}: #{unsafe}", io: $stderr)
         return 1
       end
       hostnames = store.load_routes.map(&:hostname)
-      if hosts_ok? { Hosts.sync(hostnames) }
+      if Hosts.sync_hosts_file(hostnames)
         if hostnames.empty?
-          puts Colors.green("No stale rb-portless entries remain in #{Hosts.file}.")
+          puts Colors.green("No stale rb-portless entries remain in #{hosts_display}.")
         else
-          puts Colors.green("Synced #{hostnames.length} hostname(s) to #{Hosts.file}:")
-          hostnames.each { |h| puts "  127.0.0.1 #{h}" }
+          puts Colors.green("Synced #{hostnames.length} hostname(s) to #{hosts_display}:")
+          hostnames.each { |h| puts Colors.cyan("  127.0.0.1 #{h}") }
         end
         return 0
       end
-      unless Privilege.root?
-        puts Colors.yellow("Writing to #{Hosts.file} requires elevated privileges. Requesting sudo...")
-        return 0 if Privilege.reexec_with_sudo(%w[hosts sync])
-      end
-      warn Colors.red("Failed to update #{Hosts.file}.", io: $stderr)
+      return 0 if !Privilege.root? && run_hosts_with_sudo("sync")
+
+      warn Colors.red("Failed to update #{hosts_display}.", io: $stderr)
       1
+    end
+
+    # cli.ts runHostsCleanWithSudo (and handleHosts' inline sync retry).
+    def run_hosts_with_sudo(sub)
+      puts Colors.yellow("Writing to #{Hosts.hosts_display} requires elevated privileges. Requesting sudo...")
+      Privilege.reexec_with_sudo([ "hosts", sub ])
     end
 
     # ── trust ─────────────────────────────────────────────────────────────
     def self.handle_trust(args = [ "trust" ])
       Args.parse_command_args("trust", args[1..] || [], {}, 0)
-      state = CLI.discover_state
+      state = Daemon.discover_state
       dir = state.dir
-      State.ensure_safe_dir(dir) unless File.exist?(dir)
-      if (unsafe = State.explain_unsafe(dir))
+      State.ensure_state_dir(dir) unless File.exist?(dir)
+      if (unsafe = State.explain_unsafe_state_dir(dir))
         warn Colors.red("Cannot trust the CA in #{dir}: #{unsafe}", io: $stderr)
         raise Exit, 1
       end
       result = Certs.ensure_certs(dir)
       if result.is_a?(Hash) && result[:ca_generated]
         warn Colors.gray("Generated local CA certificate.", io: $stderr)
-        if Health.proxy_running?(state.port)
-          port_flag = state.port == (state.tls ? 443 : 80) ? "" : " -p #{state.port}"
+        if Daemon.proxy_running?(state.port, state.tls)
+          port_flag = state.port == Daemon.default_port(state.tls) ? "" : " -p #{state.port}"
           warn Colors.yellow("The running proxy still serves certificates from the previous CA.", io: $stderr)
-          warn "Restart it: rb-portless proxy stop#{port_flag} && rb-portless proxy start#{port_flag}"
+          warn Colors.blue("Restart it: rb-portless proxy stop#{port_flag} && rb-portless proxy start#{port_flag}",
+                           io: $stderr)
         end
       end
       trust = Trust.trust_ca(dir)
       if trust[:trusted]
-        warn "Local CA added to system trust store."
+        warn Colors.green("Local CA added to system trust store.", io: $stderr)
         warn Colors.gray("Browsers will now trust rb-portless HTTPS certificates.", io: $stderr)
         return 0
       end
@@ -781,19 +759,23 @@ module Portless
 
     # ── prune / clean shared helpers ──────────────────────────────────────
     # {pgid => ProcessGroup::Stop}; routes sharing a group share one outcome.
+    # Groups are stopped in parallel so one survivor does not delay the others.
     def self.stop_recorded_groups(routes, signal)
       groups = routes.reject { |r| r.child_pgid.nil? }.group_by(&:child_pgid)
-      groups.to_h do |pgid, group|
+      threads = groups.map do |pgid, group|
         members = group.filter_map { |r| r.orphan_pid && { pid: r.orphan_pid, start_time: r.orphan_start_time } }
-        [ pgid, ProcessGroup.stop_process_group(pgid, group.map(&:child_start_time), members, signal,
-                                                port: group.first.port) ]
+        Thread.new do
+          [ pgid, ProcessGroup.stop_process_group(pgid, group.map(&:child_start_time), members, signal,
+                                                  port: group.first.port) ]
+        end
       end
+      threads.to_h(&:value)
     end
 
     def handle_prune(args)
       force = Args.parse_command_args("prune", args[1..], { "--force" => :boolean }, 0).has?("--force")
-      state = CLI.discover_state
-      store = new_store(state.dir)
+      state = Daemon.discover_state
+      store = Utils.new_route_store(state.dir)
       if (unsafe = store.untrusted_reason)
         warn Colors.red("Cannot prune routes recorded in #{state.dir}: #{unsafe}", io: $stderr)
         warn Colors.blue("Nothing was signaled.", io: $stderr)
@@ -861,6 +843,14 @@ module Portless
 
     def handle_clean(args)
       parsed = Args.parse_command_args("clean", args[1..], { "--yes" => :boolean, "-y" => :boolean }, 0)
+      confirmed = parsed.has?("--yes") || parsed.has?("-y")
+      requested_steps = CleanUtils.parse_cleanup_steps(ENV[CleanUtils::CLEAN_ELEVATED_STEPS_ENV])
+      if requested_steps
+        raise UsageError.new("Confirmation required.", [ "Re-run: rb-portless clean --yes" ]) unless confirmed
+
+        return CleanUtils.run_requested_cleanup(requested_steps)
+      end
+
       collected = CleanUtils.collect_state_dirs_for_cleanup_with_failures
       dirs = collected[:dirs]
       warn "Clean will:"
@@ -868,12 +858,12 @@ module Portless
       warn "  Remove the startup service if installed"
       warn "  Remove the CA from the trust store"
       warn "  Delete known state files in: #{dirs.empty? ? 'no existing state directories' : dirs.join(', ')}"
-      warn "  Remove the rb-portless block from #{Hosts.file}"
+      warn "  Remove the rb-portless block from #{Hosts.hosts_display}"
       collected[:failures].each do |failed|
-        warn Colors.yellow("  Leave #{failed} alone: #{State.explain_unsafe(failed) || 'it cannot be resolved'}", io: $stderr)
+        warn Colors.yellow("  Leave #{failed} alone: #{State.explain_unsafe_state_dir(failed) || 'it cannot be resolved'}", io: $stderr)
       end
 
-      unless parsed.has?("--yes") || parsed.has?("-y")
+      unless confirmed
         if !$stdin.tty? || !$stderr.tty? || ENV["CI"]
           raise UsageError.new("Confirmation required.", [ "Re-run: rb-portless clean --yes" ])
         end
@@ -890,8 +880,8 @@ module Portless
       service = Service.try_uninstall
       if service[:removed]
         puts Colors.green("Removed startup service.")
-      elsif service[:needs_elevation] && !Privilege.root?
-        unless Privilege.reexec_with_sudo(Service.uninstall_sudo_args)
+      elsif service[:needs_elevation] && !Constants::WINDOWS && !Privilege.root?
+        unless run_service_uninstall_with_sudo("Removing the startup service requires elevated privileges.")
           warn Colors.red("Failed to remove startup service with sudo.", io: $stderr)
           return 1
         end
@@ -905,11 +895,11 @@ module Portless
         problems += 1
       end
 
-      puts "Stopping proxy if it is running..."
-      state = CLI.discover_state
-      store = new_store(state.dir)
-      proxy_stopped = Daemon.stop(port: state.port) != false
-      if proxy_stopped && Health.proxy_running?(state.port)
+      puts Colors.cyan("Stopping proxy if it is running...")
+      state = Daemon.discover_state
+      store = Utils.new_route_store(state.dir)
+      proxy_stopped = Daemon.stop_proxy(state.dir, state.port)
+      if proxy_stopped && Health.proxy_running?(state.port, state.tls)
         warn Colors.red("Proxy is still running on port #{state.port}. Stop it and retry clean.", io: $stderr)
         proxy_stopped = false
       end
@@ -938,10 +928,35 @@ module Portless
       end
 
       warn Colors.yellow("Kept the CA in the trust store while proxy stop is unconfirmed.", io: $stderr) unless proxy_stopped
+      preserve_proxy_runtime = !proxy_stopped
       outcome = CleanUtils.run_cleanup_steps(proxy_stopped ? CleanUtils::CLEANUP_STEP_ORDER : %w[files hosts], dirs,
-                                             !proxy_stopped)
+                                             preserve_proxy_runtime)
+      failed_ca_state_dirs = outcome[:failed_ca_state_dirs].dup
+      state_failures = outcome[:state_failures]
+      hosts_cleaned = outcome[:hosts_cleaned]
+
+      retry_steps = []
+      retry_steps << "ca" unless failed_ca_state_dirs.empty?
+      retry_steps << "files" if !state_failures.empty? || !failed_ca_state_dirs.empty?
+      retry_steps << "hosts" unless hosts_cleaned
+      if !retry_steps.empty? && !Constants::WINDOWS && !Privilege.root?
+        if CleanUtils.run_elevated_cleanup(retry_steps, dirs, preserve_proxy_runtime) == 0 # rubocop:disable Style/NumericPredicate
+          failed_ca_state_dirs.clear
+          state_failures = [] if retry_steps.include?("files")
+          hosts_cleaned = true if retry_steps.include?("hosts")
+        else
+          failed_ca_state_dirs.reject! do |dir|
+            CleanUtils.can_inspect_state_dir?(dir) && !Trust.trust_refresh_pending?(dir) && !Trust.trusted?(dir)
+          end
+          if retry_steps.include?("ca") || retry_steps.include?("files")
+            state_failures = CleanUtils.remove_state_files_for_cleanup(dirs, failed_ca_state_dirs, preserve_proxy_runtime)
+          end
+          hosts_cleaned ||= Hosts.clean_hosts_file
+        end
+      end
+
       outcome[:ca_results].each do |dir, result|
-        if outcome[:failed_ca_state_dirs].include?(dir)
+        if failed_ca_state_dirs.include?(dir)
           problems += 1
           warn Colors.yellow("Could not remove CA from trust store: #{result[:error] || 'unknown error'}\n" \
                              "Delete the certificate manually, then rerun clean.", io: $stderr)
@@ -949,16 +964,16 @@ module Portless
           puts Colors.green("Removed local CA from the system trust store.")
         end
       end
-      outcome[:state_failures].each { |f| warn Colors.yellow("Could not remove state file: #{f}", io: $stderr) }
-      problems += outcome[:state_failures].length
-      puts Colors.green("Removed rb-portless state files from known state directories.") if outcome[:state_failures].empty?
-      unless outcome[:failed_ca_state_dirs].empty?
+      state_failures.each { |f| warn Colors.yellow("Could not remove state file: #{f}", io: $stderr) }
+      problems += state_failures.length
+      puts Colors.green("Removed rb-portless state files from known state directories.") if state_failures.empty?
+      unless failed_ca_state_dirs.empty?
         warn Colors.yellow("Retained CA identity files so trust removal can be retried safely.", io: $stderr)
       end
-      if outcome[:hosts_cleaned]
-        puts Colors.green("Removed rb-portless entries from #{Hosts.file}.")
+      if hosts_cleaned
+        puts Colors.green("Removed rb-portless entries from #{Hosts.hosts_display}.")
       else
-        warn Colors.yellow("Could not remove rb-portless entries from #{Hosts.file}.", io: $stderr)
+        warn Colors.yellow("Could not remove rb-portless entries from #{Hosts.hosts_display}.", io: $stderr)
         problems += 1
       end
 
@@ -968,6 +983,11 @@ module Portless
       end
       puts Colors.green("Clean finished.")
       0
+    end
+
+    def run_service_uninstall_with_sudo(reason)
+      puts Colors.yellow("#{reason} Requesting sudo...")
+      Privilege.run_sudo(Service.uninstall_sudo_args).success?
     end
 
     # ── doctor ────────────────────────────────────────────────────────────

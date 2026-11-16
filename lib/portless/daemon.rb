@@ -22,7 +22,6 @@ module Portless
 
     DEFAULT_TLD = "localhost"
     HEALTH_HEADER = "x-portless"
-    SOCKET_TIMEOUT = 0.5
     WAIT_FOR_PROXY_MAX_ATTEMPTS = 20
     WAIT_FOR_PROXY_INTERVAL = 0.25
     PROXY_STOP_TIMEOUT = 5
@@ -46,8 +45,6 @@ module Portless
     Config = Struct.new(:use_https, :custom_cert_path, :custom_key_path, :lan_mode, :lan_ip,
                         :lan_ip_explicit, :tld, :tlds, :use_wildcard, :unprivileged, keyword_init: true)
 
-    # CLI's Portless::Utils owns the shared TLD/port/env helpers; the bodies
-    # of the delegating methods here are stand-ins until that file merges.
     # ── output ────────────────────────────────────────────────────────────
     def out(msg, color = nil) = $stdout.puts(color ? Colors.public_send(color, msg, io: $stdout) : msg)
     def err(msg, color = nil) = $stderr.puts(color ? Colors.public_send(color, msg, io: $stderr) : msg)
@@ -61,24 +58,6 @@ module Portless
     def normalize_tlds(tlds) = (tlds.nil? || tlds.empty? ? [ DEFAULT_TLD ] : tlds).uniq
     def primary_tld(tlds) = tlds.first || DEFAULT_TLD
     def format_tld_list(tlds) = tlds.map { |t| ".#{t}" }.join(", ")
-
-    def risky_tld_reason(tld)
-      Utils.risky_tld_reason(tld)
-    end
-
-    def validate_tld(tld)
-      Utils.validate_tld(tld)
-    end
-
-    # Comma-separated list → validated, de-duplicated TLDs. Raises Error.
-    def parse_tld_list(value, source = "TLD")
-      Utils.parse_tld_list(value, source)
-    end
-
-    # PORTLESS_TLD (comma list) or ["localhost"]. Raises on invalid values.
-    def default_tlds = Utils.default_tlds
-
-    def default_tld = default_tlds.first
 
     def read_legacy_tld(dir)
       raw = File.read(File.join(dir, "proxy.tld")).strip
@@ -100,7 +79,7 @@ module Portless
         next [] unless value.is_a?(String)
 
         begin
-          parse_tld_list(value)
+          Utils.parse_tld_list(value)
         rescue Error => e
           warn "Warning: ignoring invalid TLD entry in proxy.tlds: #{e.message}"
           []
@@ -110,8 +89,6 @@ module Portless
     rescue StandardError
       [ read_legacy_tld(dir) ]
     end
-
-    def read_tld(dir = State.dir) = read_tlds(dir).first || DEFAULT_TLD
 
     def write_tlds(dir, tlds)
       unique = tlds.uniq
@@ -125,8 +102,6 @@ module Portless
         write_marker_file(tld_path, unique.first || DEFAULT_TLD)
       end
     end
-
-    def write_tld(dir, tld) = write_tlds(dir, [ tld ])
 
     # ── markers (cli-utils.ts) ───────────────────────────────────────────
     # Markers live in a user-owned state dir the daemon may write as root, so
@@ -196,53 +171,33 @@ module Portless
     def lan_env_enabled? = env_on?("PORTLESS_LAN")
     def unprivileged_env_enabled? = env_on?("PORTLESS_UNPRIVILEGED")
 
-    def parse_port(value)
-      Utils.parse_port(value)
-    end
-
     def protocol_port(tls) = tls ? Constants::HTTPS_PORT : Constants::HTTP_PORT
 
     # PORTLESS_PORT, else 443/80; nil tls → the legacy 1355.
     def default_port(tls = nil)
       env = ENV["PORTLESS_PORT"]
       if env && !env.empty?
-        port = parse_port(env)
+        port = Utils.parse_port(env)
         return port if port
       end
       tls.nil? ? Constants::FALLBACK_PROXY_PORT : protocol_port(tls)
     end
 
-    # ── health (cli-utils.ts isProxyRunning) ─────────────────────────────
-    # HEAD / and look for `X-Portless: 1`. Plain HTTP also detects a TLS proxy
-    # (it byte-peeks plain requests).
-    def proxy_running?(port, tls = false)
-      http = Net::HTTP.new("127.0.0.1", port)
-      http.open_timeout = SOCKET_TIMEOUT
-      http.read_timeout = SOCKET_TIMEOUT
-      if tls
-        http.use_ssl = true
-        http.verify_mode = OpenSSL::SSL::VERIFY_NONE
-      end
-      res = http.start { |h| h.head("/") }
-      res[HEALTH_HEADER] == "1"
-    rescue StandardError
-      false
-    end
-
-    def port_listening?(port) = PortOwner.port_listening?(port)
+    # Kept for callers outside this file; the probe lives in Health.
+    def proxy_running?(port, tls = false) = Health.proxy_running?(port, tls)
 
     # cli.ts isProxyUp.
     def proxy_up?(port, tls)
-      return true if proxy_running?(port, tls)
+      return true if Health.proxy_running?(port, tls)
 
-      env_set?("PORTLESS_STATE_DIR") && !ENV["PORTLESS_STATE_DIR"].empty? && port_listening?(port)
+      env_set?("PORTLESS_STATE_DIR") && !ENV["PORTLESS_STATE_DIR"].empty? && PortOwner.port_listening?(port)
     end
 
     def wait_for_proxy(port, max_attempts = WAIT_FOR_PROXY_MAX_ATTEMPTS, interval = WAIT_FOR_PROXY_INTERVAL,
                        tls = false)
       max_attempts.times do
         sleep interval
-        return true if proxy_running?(port, tls)
+        return true if Health.proxy_running?(port, tls)
       end
       false
     end
@@ -270,17 +225,17 @@ module Portless
       if env_set?("PORTLESS_STATE_DIR") && !ENV["PORTLESS_STATE_DIR"].empty?
         dir = State.dir
         port = read_port_from_dir(dir) || default_port
-        live = proxy_running?(port) || port_listening?(port)
+        live = Health.proxy_running?(port) || PortOwner.port_listening?(port)
         return state_from(dir, port, lan_ip: live ? read_lan_marker(dir) : nil)
       end
 
       dir = State.dir
       user_port = read_port_from_dir(dir)
-      return state_from(dir, user_port) if user_port && proxy_running?(user_port)
+      return state_from(dir, user_port) if user_port && Health.proxy_running?(user_port)
 
       configured = default_port
       [ Constants::HTTPS_PORT, Constants::HTTP_PORT, Constants::FALLBACK_PROXY_PORT, configured ].uniq.each do |port|
-        next unless proxy_running?(port)
+        next unless Health.proxy_running?(port)
 
         tls = read_tls_marker(dir) || port == protocol_port(true)
         return state_from(dir, port, tls: tls)
@@ -469,26 +424,11 @@ module Portless
       die!
     end
 
-    # Upstream's full names (readCurrentProxyConfig etc.), used by CLI.
-
     # ── `proxy start` (cli.ts handleProxy) ───────────────────────────────
-    # Keyword args are upstream's flags; nil = flag not given.
-    def start(port: nil, https: nil, no_tls: nil, tls: nil, cert: nil, key: nil, tlds: nil, wildcard: nil,
-              unprivileged: nil, lan: nil, ip: nil, lan_ip_auto: nil, skip_trust: false, foreground: false)
-      # Accept the contract's `tls:` spelling too (tls: false ≙ --no-tls).
-      no_tls = true if tls == false && no_tls.nil?
-      https = true if tls == true && https.nil?
-      # Upstream's main() turns the global --lan/--ip/--lan-ip-auto flags into env.
-      ENV["PORTLESS_LAN"] = "1" if lan
-      unless ip.to_s.empty?
-        ENV["PORTLESS_LAN_IP"] = ip
-        ENV["PORTLESS_LAN"] = "1"
-      end
-      unless lan_ip_auto.to_s.empty?
-        ENV[INTERNAL_LAN_IP_ENV] = lan_ip_auto
-        ENV["PORTLESS_LAN"] = "1"
-      end
-
+    # Keyword args are upstream's flags (already validated by the CLI: the
+    # port is an Integer, --cert/--key come together); nil = flag not given.
+    def start(port: nil, https: nil, no_tls: nil, cert: nil, key: nil, tlds: nil, wildcard: nil,
+              unprivileged: nil, skip_trust: false, foreground: false)
       skip_trust = !!skip_trust
       has_unprivileged_flag = !!unprivileged
       has_https_flag = !!https
@@ -497,22 +437,13 @@ module Portless
 
       custom_cert_path = cert
       custom_key_path = key
-      raise UsageError, "--cert and --key must be used together." if custom_cert_path.nil? != custom_key_path.nil?
-
       use_https = want_https || !!(custom_cert_path && custom_key_path)
 
-      has_explicit_port = false
-      proxy_port = default_port(use_https)
-      unless port.nil?
-        parsed = parse_port(port)
-        raise UsageError.new("Invalid port number: #{port}", [ "Port must be between 1 and 65535." ]) unless parsed
-
-        proxy_port = parsed
-        has_explicit_port = true
-      end
+      has_explicit_port = !port.nil?
+      proxy_port = port || default_port(use_https)
 
       begin
-        flag_tlds = default_tlds
+        flag_tlds = Utils.default_tlds
       rescue Error => e
         err("Error: #{e.message}", :red)
         die!
@@ -520,7 +451,7 @@ module Portless
       tld_flag_values = Array(tlds)
       unless tld_flag_values.empty?
         begin
-          flag_tlds = normalize_tlds(tld_flag_values.flat_map { |v| parse_tld_list(v) })
+          flag_tlds = normalize_tlds(tld_flag_values.flat_map { |v| Utils.parse_tld_list(v) })
         rescue Error => e
           raise UsageError.new(e.message, [ "See: rb-portless proxy start --help" ])
         end
@@ -544,8 +475,8 @@ module Portless
       unless has_explicit_port
         current = discover_state
         persisted_lan_mode = current[:lan_mode]
-        if proxy_running?(current[:port]) ||
-           (env_set?("PORTLESS_STATE_DIR") && port_listening?(current[:port]))
+        if Health.proxy_running?(current[:port]) ||
+           (env_set?("PORTLESS_STATE_DIR") && PortOwner.port_listening?(current[:port]))
           running_port = current[:port]
           proxy_port = current[:port]
           state_dir = current[:dir]
@@ -554,7 +485,7 @@ module Portless
 
       desired = resolve_config(
         persisted_lan_mode: persisted_lan_mode, persisted_unprivileged: read_unprivileged_marker(state_dir),
-        explicit: explicit, default_tlds: default_tlds, use_https: use_https,
+        explicit: explicit, default_tlds: Utils.default_tlds, use_https: use_https,
         custom_cert_path: custom_cert_path, custom_key_path: custom_key_path, lan_mode: lan_env_enabled?,
         lan_ip: ENV["PORTLESS_LAN_IP"].to_s.empty? ? nil : ENV["PORTLESS_LAN_IP"], tlds: flag_tlds,
         use_wildcard: use_wildcard, unprivileged: has_unprivileged_flag || unprivileged_env_enabled?
@@ -580,7 +511,7 @@ module Portless
       end
 
       flag_tlds.each do |configured|
-        reason = risky_tld_reason(configured)
+        reason = Utils.risky_tld_reason(configured)
         warn Colors.yellow("Warning: .#{configured}: #{reason}", io: $stderr) if reason && !lan_mode
       end
 
@@ -603,9 +534,9 @@ module Portless
       end
 
       store = route_store(state_dir)
-      store.recover_corrupt_routes_file if store.respond_to?(:recover_corrupt_routes_file)
+      store.recover_corrupt_routes_file
 
-      if running_port || proxy_running?(proxy_port)
+      if running_port || Health.proxy_running?(proxy_port)
         running = read_current_proxy_config(state_dir)
         messages = proxy_config_mismatch_messages(desired, running, explicit)
         print_proxy_config_mismatch(proxy_port, desired, messages) unless messages.empty?
@@ -691,10 +622,10 @@ module Portless
       recovery = format_proxy_start_command(proxy_port, resolved)
 
       out("Port #{proxy_port} requires elevated privileges. Requesting sudo...", :yellow)
-      store.ensure_dir if File.directory?(store_dir(store))
-      status = Privilege.sudo(args)
+      store.ensure_dir if File.directory?(store.dir)
+      result = Privilege.sudo(args)
 
-      if status&.success?
+      if result.success?
         unless foreground
           if wait_for_proxy(proxy_port)
             out("Proxy started on port #{proxy_port}.", :green)
@@ -707,12 +638,12 @@ module Portless
         return true
       end
 
-      failure = if status.nil?
-                  "sudo could not be started"
-      elsif status.signaled?
-                  "terminated by signal #{Signal.signame(status.termsig)}"
+      failure = if result.error
+                  result.error
+      elsif result.status.signaled?
+                  "terminated by signal SIG#{Signal.signame(result.status.termsig)}"
       else
-                  "exited with status #{status.exitstatus}"
+                  "exited with status #{result.status.exitstatus}"
       end
       err("Error: Port #{proxy_port} requires elevated privileges, but sudo elevation failed: #{failure}.", :red)
       err("Resolve the sudo error, then rerun the requested startup:", :blue)
@@ -741,7 +672,7 @@ module Portless
 
     def prepare_generated_certs(state_dir, tlds, unprivileged, skip_trust)
       err("Ensuring TLS certificates...", :gray)
-      certs = ensure_certs(state_dir)
+      certs = Certs.ensure_certs(state_dir)
       err("Generated local CA certificate.", :green) if certs[:ca_generated]
 
       if unprivileged && !Trust.trusted?(state_dir)
@@ -766,16 +697,8 @@ module Portless
         ca: File.binread(certs[:ca_path]), state_dir: state_dir, tlds: tlds }
     end
 
-    # certs.ts ensureCerts → {cert_path:, key_path:, ca_path:, ca_generated:}.
-    # Adapts to the PROXY workstream's certs.rb.
-    def ensure_certs(state_dir)
-      return Certs.ensure_certs(state_dir) if Certs.respond_to?(:ensure_certs)
-
-      had_ca = File.exist?(File.join(state_dir, "ca.pem"))
-      Certs.new.ensure_ca!
-      { cert_path: File.join(state_dir, "server.pem"), key_path: File.join(state_dir, "server-key.pem"),
-        ca_path: File.join(state_dir, "ca.pem"), ca_generated: !had_ca }
-    end
+    # Kept for trust.rb; certs.ts ensureCerts lives in Certs.
+    def ensure_certs(state_dir) = Certs.ensure_certs(state_dir)
 
     # Fork the foreground daemon detached, logging to proxy.log.
     def spawn_daemon(store, state_dir, proxy_port, desired, lan_ip)
@@ -796,9 +719,7 @@ module Portless
         unprivileged: desired.unprivileged, foreground: true, include_port: true, proxy_port: proxy_port,
         skip_trust: true
       )[:args] ]
-      # An auto-detected LAN IP rides along in the env for the first boot.
-      env = desired.lan_mode && !desired.lan_ip_explicit && lan_ip ? { INTERNAL_LAN_IP_ENV => lan_ip } : {}
-      pid = Process.spawn(env, *Privilege.cli_argv, *args, in: File::NULL, out: log, err: log, pgroup: true)
+      pid = Process.spawn(*Privilege.cli_argv, *args, in: File::NULL, out: log, err: log, pgroup: true)
       Process.detach(pid)
       log.close
 
@@ -825,12 +746,12 @@ module Portless
     # ── the foreground server (cli.ts startProxyServer) ──────────────────
     def start_proxy_server(store, proxy_port, tld, tlds, tls_options, lan_ip, strict, custom_cert, unprivileged)
       store.ensure_dir
-      dir = store_dir(store)
+      dir = store.dir
       is_tls = !tls_options.nil?
       mdns = Mdns.supported
       active_lan_ip = lan_ip && mdns[:supported] ? lan_ip : nil
       lan_mode_active = !active_lan_ip.nil?
-      bind_target = Privilege.bind_targets(lan_mode_active, unprivileged).first
+      bind_targets = Privilege.bind_targets(lan_mode_active, unprivileged)
       loopback_only = unprivileged && !lan_mode_active
       lan_ip_pinned = !ENV["PORTLESS_LAN_IP"].to_s.empty?
       lan_monitor = nil
@@ -861,7 +782,7 @@ module Portless
       end
       reload_warning_shown = false
 
-      auto_sync_hosts = !unprivileged && Hosts.should_auto_sync?(ENV["PORTLESS_SYNC_HOSTS"])
+      auto_sync_hosts = !unprivileged && Hosts.should_auto_sync_hosts?(ENV["PORTLESS_SYNC_HOSTS"])
       hosts_sync_token = HostsSyncAuth.generate_token
       on_mdns_error = ->(msg) { warn Colors.yellow(msg, io: $stderr) }
 
@@ -969,6 +890,18 @@ module Portless
       mode_label = "#{strict == false ? ' (wildcard)' : ''}" \
                    "#{loopback_only ? ' (unprivileged, loopback peers only)' : ''}"
 
+      on_auxiliary_listen = lambda do |kind, host, port, error|
+        if error
+          next if kind == :redirect || unavailable_ipv6_bind?(error, host)
+
+          warn Colors.yellow("Could not listen on #{format_bind_endpoint(host, port)}: #{error.message}", io: $stderr)
+        elsif kind == :redirect
+          out("HTTP-to-HTTPS redirect listening on #{format_bind_endpoint(host, port)}", :green)
+        else
+          out("#{proto} proxy listening on #{format_bind_endpoint(host, port)}#{tld_label}#{mode_label}", :green)
+        end
+      end
+
       on_listening = lambda do
         warn Colors.yellow("Could not publish hosts sync authorization.", io: $stderr) unless
           HostsSyncAuth.write_token(dir, hosts_sync_token)
@@ -981,7 +914,7 @@ module Portless
         write_lan_marker(dir, active_lan_ip)
         write_unprivileged_marker(dir, unprivileged)
         State.fix_ownership(File.join(dir, "proxy.pid"), File.join(dir, "proxy.port"), File.join(dir, "proxy.start"))
-        out("#{proto} proxy listening on #{format_bind_endpoint(bind_target[:host], proxy_port)}" \
+        out("#{proto} proxy listening on #{format_bind_endpoint(bind_targets.first[:host], proxy_port)}" \
             "#{tld_label}#{mode_label}", :green)
         if active_lan_ip
           out("LAN mode: #{active_lan_ip}", :green)
@@ -998,15 +931,15 @@ module Portless
             )
           end
         end
-        $stdout.write(Colors.cyan("\nProxy is running. Press Ctrl+C to stop.\n", io: $stdout), "\n")
-        out("Routes file: #{routes_path}", :gray)
       end
 
       proxy = Proxy.new(
         port: proxy_port, routes: get_routes, tlds: tlds, strict: strict != false, tls: tls_options,
-        loopback_only: loopback_only, lan_bind: lan_mode_active || unprivileged,
+        loopback_only: loopback_only, bind_targets: bind_targets,
+        redirect_http: is_tls && proxy_port != Constants::HTTP_PORT,
         on_hosts_sync_request: on_hosts_sync_request, hosts_sync_token: hosts_sync_token,
-        on_listening: on_listening, on_error: ->(msg) { warn Colors.red(msg, io: $stderr) }
+        on_listening: on_listening, on_auxiliary_listen: on_auxiliary_listen,
+        on_error: ->(msg) { warn Colors.red(msg, io: $stderr) }
       )
 
       exiting = false
@@ -1022,7 +955,7 @@ module Portless
         reset_proxy_markers(dir)
         HostsSyncAuth.remove_token(dir)
         Hosts.clean_hosts_file if auto_sync_hosts
-        proxy.stop if proxy.respond_to?(:stop)
+        proxy.stop
       end
 
       %w[INT TERM].each do |sig|
@@ -1036,6 +969,9 @@ module Portless
           end
         end
       end
+
+      $stdout.write(Colors.cyan("\nProxy is running. Press Ctrl+C to stop.\n", io: $stdout), "\n")
+      out("Routes file: #{routes_path}", :gray)
 
       begin
         proxy.run
@@ -1068,10 +1004,8 @@ module Portless
 
     def format_bind_endpoint(host, port) = host.include?(":") ? "[#{host}]:#{port}" : "#{host}:#{port}"
 
-    def store_dir(store)
-      return store.dir if store.respond_to?(:dir)
-
-      File.dirname(store.routes_path)
+    def unavailable_ipv6_bind?(error, host)
+      host.include?(":") && (error.is_a?(Errno::EAFNOSUPPORT) || error.is_a?(Errno::EADDRNOTAVAIL))
     end
 
     def route_store(dir)
@@ -1101,20 +1035,17 @@ module Portless
       [ path, "#{path}.tmp" ].each { |f| FileUtils.rm_f(f) }
       write_tls_marker(dir, false)
       write_custom_cert_marker(dir, false)
-      write_tld(dir, DEFAULT_TLD)
+      write_tlds(dir, [ DEFAULT_TLD ])
       write_lan_marker(dir, nil)
     end
 
     # ── `proxy stop` (cli.ts stopProxy & friends) ────────────────────────
     def stop(port: nil)
       if port
-        explicit = parse_port(port)
-        raise UsageError.new("Invalid port number: #{port}", [ "Port must be between 1 and 65535." ]) unless explicit
-
-        stop_proxy(nil, State.dir, explicit)
+        stop_proxy(State.dir, port)
       else
         state = discover_state
-        stop_proxy(nil, state[:dir], state[:port])
+        stop_proxy(state[:dir], state[:port])
       end
     end
 
@@ -1142,7 +1073,7 @@ module Portless
       holders = PortOwner.pids_on_port(proxy_port)
       return :proxy if holders.include?(pid)
       return :recycled unless holders.empty?
-      return :recycled if !port_listening?(proxy_port) && PortOwner.suspended?(pid) != true
+      return :recycled if !PortOwner.port_listening?(proxy_port) && PortOwner.suspended?(pid) != true
 
       :unknown
     end
@@ -1153,7 +1084,7 @@ module Portless
         err("Port file changed to #{read_state_file(port_file)}; leaving it in place.", :red)
         return false
       end
-      if proxy_running?(proxy_port)
+      if Health.proxy_running?(proxy_port)
         err("Proxy restarted on port #{proxy_port}; leaving its state in place.", :red)
         return false
       end
@@ -1164,7 +1095,7 @@ module Portless
     def wait_for_proxy_to_close(proxy_port, pid, timeout)
       deadline = monotonic + timeout
       loop do
-        return true if !PortOwner.running?(pid) && !proxy_running?(proxy_port)
+        return true if !PortOwner.running?(pid) && !Health.proxy_running?(proxy_port)
         return false if monotonic >= deadline
 
         sleep PROXY_STOP_POLL
@@ -1173,12 +1104,12 @@ module Portless
 
     # cli.ts readRecordedProxy → {state:, pid:, reason:, identity:}
     def read_recorded_proxy(dir, proxy_port)
-      unsafe = State.explain_unsafe_state_dir(dir)
+      unsafe = File.exist?(dir) ? State.explain_unsafe_state_dir(dir) : nil # routes.ts untrustedReason
       return { state: :untrusted, reason: unsafe } if unsafe
 
       pid_path = File.join(dir, "proxy.pid")
       unless File.exist?(pid_path)
-        return { state: :stopped } unless proxy_running?(proxy_port)
+        return { state: :stopped } unless Health.proxy_running?(proxy_port)
 
         return { state: :unrecorded, pid: PortOwner.pid_on_port(proxy_port) }
       end
@@ -1192,7 +1123,7 @@ module Portless
       rescue StandardError
         return { state: :dead }
       end
-      answering = proxy_running?(proxy_port)
+      answering = Health.proxy_running?(proxy_port)
       identity = identify_recorded_proxy(dir, pid, proxy_port)
       return { state: answering ? :mismatched : :recycled, pid: pid } if identity == :recycled
       return { state: :running, pid: pid } if answering
@@ -1219,7 +1150,7 @@ module Portless
 
     def sudo_stop(port)
       out("Proxy is running as root. Elevating with sudo to stop it...", :yellow)
-      Privilege.sudo([ "proxy", "stop", "-p", port.to_s ])&.success? || false
+      Privilege.sudo([ "proxy", "stop", "-p", port.to_s ]).success?
     end
 
     def sudo_stop_or_hint(port)
@@ -1237,7 +1168,7 @@ module Portless
       false
     end
 
-    def stop_proxy(_store, dir, proxy_port)
+    def stop_proxy(dir, proxy_port)
       proxy = read_recorded_proxy(dir, proxy_port)
       pid_path = File.join(dir, "proxy.pid")
       case proxy[:state]
@@ -1320,7 +1251,7 @@ module Portless
     # ── auto-start for `run` (cli.ts) ────────────────────────────────────
     # cli.ts resolveProxyDesiredState → {explicit:, desired_config:, env_tld:, env_tlds:}
     def resolve_desired_state(lan_mode)
-      env_tlds = default_tlds
+      env_tlds = Utils.default_tlds
       explicit = {
         use_https: env_set?("PORTLESS_HTTPS"), custom_cert: false, lan_mode: env_set?("PORTLESS_LAN"),
         lan_ip: env_set?("PORTLESS_LAN_IP"), tlds: env_set?("PORTLESS_TLD"),
@@ -1394,7 +1325,7 @@ module Portless
         WAIT_FOR_PROXY_MAX_ATTEMPTS.times do
           sleep WAIT_FOR_PROXY_INTERVAL
           state = discover_state
-          if proxy_running?(state[:port])
+          if Health.proxy_running?(state[:port])
             discovered = state
             break
           end
@@ -1433,10 +1364,10 @@ module Portless
     # :available | :absent | :mute
     def probe_hosts_sync_auth(port, tls, token, challenge)
       res = http_for(port, tls).start do |h|
-        h.head("/", HostsSyncAuth::CHALLENGE_HEADER => challenge)
+        h.head("/", HostsSyncAuth::HOSTS_SYNC_AUTH_CHALLENGE_HEADER => challenge)
       end
       expected = token ? HostsSyncAuth.create_proof(token, challenge) : nil
-      supplied = res[HostsSyncAuth::PROOF_HEADER]
+      supplied = res[HostsSyncAuth::HOSTS_SYNC_AUTH_PROOF_HEADER]
       available = res[HEALTH_HEADER] == "1" && supplied && expected &&
                   HostsSyncAuth.valid_token?(supplied) && HostsSyncAuth.secure_compare(supplied, expected)
       available ? :available : :mute
@@ -1454,7 +1385,7 @@ module Portless
       return :mute unless token
 
       res = http_for(port, tls).start do |h|
-        h.post(HOSTS_SYNC_PATH, "", HostsSyncAuth::HEADER => token)
+        h.post(HOSTS_SYNC_PATH, "", HostsSyncAuth::HOSTS_SYNC_AUTH_HEADER => token)
       end
       case res.code.to_i
       when 204 then :acted
@@ -1469,7 +1400,7 @@ module Portless
     # cli-utils.ts reportHostsSync.
     def report_hosts_sync(hostnames, port, tls, lan_mode, trigger: method(:trigger_hosts_sync),
                           resolves: ->(h) { Hosts.check_host_resolution(h) }, ceiling: UNTRIGGERED_SYNC_CEILING,
-                          read_managed: -> { Hosts.managed_hostnames }, &on_warn)
+                          read_managed: -> { Hosts.get_managed_hostnames }, &on_warn)
       managed = lan_mode ? hostnames.reject { |h| h.end_with?(".local") } : hostnames
       return if managed.empty?
 
@@ -1504,7 +1435,5 @@ module Portless
     end
 
     def monotonic = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-
-    def lib_dir = Privilege.lib_dir
   end
 end

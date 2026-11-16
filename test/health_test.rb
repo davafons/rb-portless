@@ -18,36 +18,30 @@ class HealthTest < Minitest::Test
       nil
     end
 
-    refute Portless::Health.proxy_running?(server.addr[1], timeout: 0.1)
+    refute Portless::Health.proxy_running?(server.addr[1], true, timeout: 0.1)
   ensure
     server&.close
     thread&.kill
   end
 
-  def test_recognises_only_x_portless_1
-    assert Portless::Health.marker?("HTTP/1.1 404 Not Found\r\nX-Portless: 1\r\n\r\n")
-    refute Portless::Health.marker?("HTTP/1.1 404 Not Found\r\nx-portless: 0.4.0\r\n\r\n")
-    refute Portless::Health.marker?("HTTP/1.1 200 OK\r\nserver: nginx\r\n\r\n")
-    refute Portless::Health.marker?(nil)
+  def test_requires_x_portless_1
+    with_server("X-Portless: 1\r\n") { |port| assert Portless::Health.proxy_running?(port) }
+    with_server("x-portless: 0.4.0\r\n") { |port| refute Portless::Health.proxy_running?(port) }
+    with_server("server: nginx\r\n") { |port| refute Portless::Health.proxy_running?(port) }
   end
 
-  def test_plain_probe_against_a_fake_portless_server
+  def with_server(headers)
     server = TCPServer.new("127.0.0.1", 0)
     thread = Thread.new do
       client = server.accept
       client.readpartial(1024)
-      client.write("HTTP/1.1 404 Not Found\r\nX-Portless: 1\r\nContent-Length: 0\r\n\r\n")
+      client.write("HTTP/1.1 404 Not Found\r\n#{headers}Content-Length: 0\r\n\r\n")
       client.close
     end
-    assert Portless::Health.proxy_running?(server.addr[1], tls: false)
+    yield server.addr[1]
   ensure
     server&.close
     thread&.kill
-  end
-
-  def test_discover_port_returns_a_port_or_nil
-    result = Portless::Health.discover_port
-    assert(result.nil? || result.is_a?(Integer))
   end
 
   def free_port

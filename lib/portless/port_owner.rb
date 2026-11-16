@@ -26,8 +26,6 @@ module Portless
     rescue StandardError
       []
     end
-    alias listeners pids_on_port
-    module_function :listeners
 
     def pid_on_port(port) = pids_on_port(port).first
 
@@ -53,20 +51,6 @@ module Portless
         return pid if pid&.positive?
       end
       nil
-    end
-
-    # Signal every listener on `port` (TERM, or KILL with force). Never signals
-    # ourselves. Returns how many processes were signalled.
-    def kill(port, force: false)
-      sig = force ? "KILL" : "TERM"
-      pids_on_port(port).count do |pid|
-        next false if pid == Process.pid
-
-        Process.kill(sig, pid)
-        true
-      rescue StandardError
-        false
-      end
     end
 
     # A stable identity for a live pid, so a recycled pid can be told apart.

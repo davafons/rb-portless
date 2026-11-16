@@ -32,7 +32,7 @@ class RouteStoreContentionTest < Minitest::Test
 
     Timeout.timeout(20) { dones.each { |r| r.read(1) } } # every writer finished its add
 
-    hostnames = Portless::RouteStore.new.routes.map(&:hostname)
+    hostnames = Portless::RouteStore.new.load_routes.map(&:hostname)
     WRITERS.times do |i|
       assert_includes hostnames, "contend-#{i}.localhost"
     end
@@ -43,21 +43,22 @@ class RouteStoreContentionTest < Minitest::Test
     rescue StandardError
       nil
     end
-    Portless::RouteStore.new.prune
+    store = Portless::RouteStore.new
+    store.find_stale_routes.each { |route| store.remove_stale_route(route.hostname, route.pid) }
   end
 
   def test_a_stale_lock_is_stolen_not_fatal
     Portless::State.ensure_dir!
-    Dir.mkdir(Portless::State.routes_lock)
+    Dir.mkdir(File.join(Portless::State.dir, "routes.lock"))
     # Backdate the lock dir beyond the staleness threshold.
     old = Time.now - (Portless::RouteStore::STALE_LOCK_THRESHOLD + 5)
-    File.utime(old, old, Portless::State.routes_lock)
+    File.utime(old, old, File.join(Portless::State.dir, "routes.lock"))
 
     store = Portless::RouteStore.new
     store.add_route(hostname: "stale-lock.localhost", port: 4999, pid: Process.pid)
-    assert_includes store.routes.map(&:hostname), "stale-lock.localhost"
+    assert_includes store.load_routes.map(&:hostname), "stale-lock.localhost"
   ensure
     Portless::RouteStore.new.remove_route("stale-lock.localhost")
-    Dir.rmdir(Portless::State.routes_lock) rescue nil
+    Dir.rmdir(File.join(Portless::State.dir, "routes.lock")) rescue nil
   end
 end

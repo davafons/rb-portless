@@ -42,25 +42,22 @@ class ProxyTest < Minitest::Test
     Route.new(hostname: hostname, port: port, pid: pid, extra: {}, **extra)
   end
 
-  def tls_options(tlds = [ "localhost" ])
+  def tls_options
     certs = Portless::Certs.ensure_certs(@dir)
-    cert = File.read(certs[:cert_path])
-    key = File.read(certs[:key_path])
-    ca = File.read(certs[:ca_path])
-    { cert: cert, key: key, ca: ca, sni_callback: Portless::Certs.create_sni_callback(@dir, cert, key, tlds, ca) }
+    { cert: File.read(certs[:cert_path]), key: File.read(certs[:key_path]), ca: File.read(certs[:ca_path]), state_dir: @dir }
   end
 
   def start_proxy(routes, tls: nil, **options)
     port = free_port
-    tls = tls_options(options.fetch(:tlds, [ "localhost" ])) if tls == true
+    tls = tls_options if tls == true
     reader, writer = IO.pipe
     errors_r, errors_w = IO.pipe
     pid = fork do
       reader.close
       errors_r.close
-      proxy = Portless::Proxy.new(port: port, routes: -> { routes }, tls: tls, redirect_http: false,
+      proxy = Portless::Proxy.new(port: port, routes: -> { routes }, tls: tls,
                                   on_error: ->(m) { errors_w.puts(m) },
-                                  on_listening: ->(_) { writer.write("."); writer.close }, **options)
+                                  on_listening: -> { writer.write("."); writer.close }, **options)
       proxy.run
     rescue StandardError => e
       warn e.full_message
@@ -153,6 +150,10 @@ class ProxyTest < Minitest::Test
     assert Portless::Proxy.loopback_authority?("[::1]")
     refute Portless::Proxy.loopback_authority?("127.0.0.1:0")
     refute Portless::Proxy.loopback_authority?("127.0.0.1.nip.io")
+    assert Portless::RouteStore.ipv4?("10.0.0.255")
+    refute Portless::RouteStore.ipv4?("10.0.0.256")
+    refute Portless::RouteStore.ipv4?("10.0.0.01")
+    refute Portless::RouteStore.ipv4?("1.2.3.4/8")
   end
 
   # --- routing ----------------------------------------------------------------
@@ -288,6 +289,65 @@ class ProxyTest < Minitest::Test
                    "message" => "The target app is not responding. It may have crashed." }, JSON.parse(res.body))
   end
 
+  def test_dead_backend_logs_both_loopback_failures_like_node
+    backend = free_port
+    port = start_proxy([ route("app.localhost", backend) ])
+    http(port, "app.localhost")
+    assert_equal "Proxy error for app.localhost: Both loopback connections failed; " \
+                 "Error: connect ECONNREFUSED 127.0.0.1:#{backend}; Error: connect ECONNREFUSED ::1:#{backend}",
+                 @errors.gets.chomp
+  end
+
+  # A backend that reads each request; `script` decides per request (by
+  # connection and request index) whether to answer or hang up.
+  def scripted_backend(&script)
+    server = TCPServer.new("127.0.0.1", 0)
+    @servers << server
+    log = Queue.new
+    Thread.new do
+      conn = 0
+      loop do
+        client = server.accept
+        conn += 1
+        Thread.new(client, conn) do |c, n|
+          index = 0
+          while (line = c.gets)
+            line = c.gets until line.nil? || line == "\r\n"
+            index += 1
+            log << [ n, index ]
+            break unless script.call(n, index)
+
+            c.write("HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok")
+          end
+          c.close
+        rescue StandardError
+          c.close rescue nil
+        end
+      end
+    rescue IOError
+      nil
+    end
+    [ server.addr[1], log ]
+  end
+
+  def drain(queue) = Array.new(queue.size) { queue.pop }
+
+  def test_reset_on_a_fresh_backend_connection_is_a_502_without_replay
+    backend, log = scripted_backend { |_conn, _index| false }
+    port = start_proxy([ route("app.localhost", backend) ])
+    assert_equal "502", http(port, "app.localhost").code
+    assert_equal [ [ 1, 1 ] ], drain(log)
+  end
+
+  def test_reset_on_a_reused_backend_connection_replays_once
+    # Connection 1 answers its first request, then hangs up on the reuse.
+    backend, log = scripted_backend { |conn, index| !(conn == 1 && index == 2) }
+    port = start_proxy([ route("app.localhost", backend) ])
+    assert_equal "200", http(port, "app.localhost").code
+    assert_equal "ok", http(port, "app.localhost").body
+    assert_equal [ [ 1, 1 ], [ 1, 2 ], [ 2, 1 ] ], drain(log)
+  end
+
   def test_upstream_json_errors_pass_through_unchanged
     backend = echo_backend { |c, _| c.write(%(HTTP/1.1 503 Service Unavailable\r\ncontent-type: application/json\r\ncontent-length: 11\r\n\r\n{"down":1}\n)) }
     port = start_proxy([ route("app.localhost", backend) ])
@@ -394,6 +454,38 @@ class ProxyTest < Minitest::Test
     ssl&.close
   end
 
+  def issue_cert(subject, issuer_cert, issuer_key, ca:)
+    key = OpenSSL::PKey::EC.generate("prime256v1")
+    cert = OpenSSL::X509::Certificate.new
+    cert.version = 2
+    cert.serial = rand(1 << 30)
+    cert.subject = OpenSSL::X509::Name.parse(subject)
+    cert.issuer = issuer_cert ? issuer_cert.subject : cert.subject
+    cert.public_key = OpenSSL::PKey.read(key.public_to_pem)
+    cert.not_before = Time.now - 60
+    cert.not_after = Time.now + 3600
+    ef = OpenSSL::X509::ExtensionFactory.new(issuer_cert || cert, cert)
+    cert.add_extension(ef.create_extension("basicConstraints", ca ? "CA:TRUE" : "CA:FALSE", true))
+    cert.sign(issuer_key || key, OpenSSL::Digest.new("SHA256"))
+    [ cert, key ]
+  end
+
+  def test_custom_cert_serves_its_intermediate_chain
+    root, root_key = issue_cert("/CN=Root", nil, nil, ca: true)
+    inter, inter_key = issue_cert("/CN=Intermediate", root, root_key, ca: true)
+    leaf, leaf_key = issue_cert("/CN=app.localhost", inter, inter_key, ca: false)
+    port = start_proxy([], tls: { cert: leaf.to_pem + inter.to_pem, key: leaf_key.to_pem, custom: true })
+    socket = Socket.tcp("127.0.0.1", port)
+    ctx = OpenSSL::SSL::SSLContext.new
+    ctx.verify_mode = OpenSSL::SSL::VERIFY_NONE
+    ssl = OpenSSL::SSL::SSLSocket.new(socket, ctx)
+    ssl.hostname = "app.localhost"
+    ssl.connect
+    assert_equal %w[/CN=app.localhost /CN=Intermediate], ssl.peer_cert_chain.map { |c| c.subject.to_s }
+  ensure
+    ssl&.close
+  end
+
   def test_tls_refuses_sni_outside_the_tlds
     port = start_proxy([], tls: true)
     assert_raises(OpenSSL::SSL::SSLError, Errno::ECONNRESET, EOFError) { http(port, "evil.com", tls: true) }
@@ -465,6 +557,56 @@ class ProxyTest < Minitest::Test
     assert_includes response, "Bad Gateway: the target app is not responding"
   end
 
+  def test_hop_by_hop_response_headers_are_stripped_only_over_tls
+    backend = echo_backend do |c, _head|
+      c.write("HTTP/1.1 200 OK\r\nkeep-alive: timeout=5\r\nproxy-connection: x\r\ncontent-length: 2\r\n\r\nok")
+    end
+    plain = http(start_proxy([ route("app.localhost", backend) ]), "app.localhost")
+    assert_equal "timeout=5", plain["keep-alive"]
+    assert_equal "x", plain["proxy-connection"]
+    tls = http(start_proxy([ route("app.localhost", backend) ], tls: true), "app.localhost", tls: true)
+    assert_equal "ok", tls.body
+    assert_nil tls["keep-alive"]
+    assert_nil tls["proxy-connection"]
+  end
+
+  def test_websocket_rejection_relays_the_backend_headers
+    backend = echo_backend do |c, _head|
+      c.write("HTTP/1.1 401 Unauthorized\r\nconnection: close\r\nkeep-alive: timeout=5\r\ncontent-length: 4\r\n\r\nnope")
+    end
+    port = start_proxy([ route("app.localhost", backend) ])
+    response = raw(port, "GET / HTTP/1.1\r\nHost: app.localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" \
+                         "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n")
+    assert_match(/\AHTTP\/1\.1 401/, response)
+    assert_equal [ "connection: close" ], response.downcase.scan(/^connection: .*?(?=\r)/)
+    assert_includes response.downcase, "keep-alive: timeout=5"
+    assert response.end_with?("nope")
+  end
+
+  def test_websocket_upgrade_without_a_route_drops_the_socket
+    port = start_proxy([])
+    response = raw(port, "GET / HTTP/1.1\r\nHost: nope.localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" \
+                         "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n")
+    assert_equal "", response
+  end
+
+  def test_http11_connect_drops_the_socket_on_every_listener
+    connect = "CONNECT app.localhost:443 HTTP/1.1\r\nHost: app.localhost:443\r\n\r\n"
+    assert_equal "", raw(start_proxy([]), connect)
+    tls_port = start_proxy([], tls: true)
+    assert_equal "", raw(tls_port, connect), "plain HTTP on the TLS port"
+    ctx = OpenSSL::SSL::SSLContext.new
+    ctx.verify_mode = OpenSSL::SSL::VERIFY_NONE
+    ctx.alpn_protocols = %w[http/1.1]
+    ssl = OpenSSL::SSL::SSLSocket.new(Socket.tcp("127.0.0.1", tls_port), ctx)
+    ssl.hostname = "app.localhost"
+    ssl.connect
+    ssl.write(connect)
+    assert_nil ssl.read(1)
+  ensure
+    ssl&.close
+  end
+
   # --- hosts sync -----------------------------------------------------------------
 
   TOKEN = "a" * 64
@@ -506,12 +648,24 @@ class ProxyTest < Minitest::Test
 
   # --- listening ------------------------------------------------------------------
 
-  def test_binds_loopback_by_default_and_wildcard_for_lan
-    proxy = Portless::Proxy.new(port: 1, routes: -> { [] })
-    assert_equal %w[127.0.0.1 ::1], proxy.bind_targets.map { |t| t[:host] }
-    lan = Portless::Proxy.new(port: 1, routes: -> { [] }, lan_bind: true)
-    assert_equal %w[0.0.0.0 ::], lan.bind_targets.map { |t| t[:host] }
-    assert lan.bind_targets.last[:ipv6_only]
+  def run_with_events(port, targets)
+    events = []
+    proxy = Portless::Proxy.new(port: port, routes: -> { [] }, bind_targets: targets,
+                                on_auxiliary_listen: ->(kind, host, p, e) { events << [ kind, host, p, e&.class ] },
+                                on_listening: -> { events << :primary; proxy.stop })
+    Timeout.timeout(5) { proxy.run }
+    events
+  end
+
+  def test_reports_auxiliary_binds_before_the_primary_listens
+    targets = [ { host: "127.0.0.1" }, { host: "::1", ipv6_only: true } ]
+    port = free_port
+    assert_equal [ [ :proxy, "::1", port, nil ], :primary ], run_with_events(port, targets)
+
+    blocker = TCPServer.new("::1", 0)
+    @servers << blocker
+    busy = blocker.addr[1]
+    assert_equal [ [ :proxy, "::1", busy, Errno::EADDRINUSE ], :primary ], run_with_events(busy, targets)
   end
 
   def test_primary_bind_failure_raises_without_noise
@@ -523,7 +677,7 @@ class ProxyTest < Minitest::Test
 
   def test_loopback_only_serves_loopback_and_closes_other_peers
     backend = echo_backend
-    port = start_proxy([ route("app.localhost", backend) ], lan_bind: true, loopback_only: true)
+    port = start_proxy([ route("app.localhost", backend) ], bind_targets: Portless::Privilege.bind_targets(true), loopback_only: true)
     assert_equal "200", http(port, "app.localhost").code
     lan_ip = Socket.ip_address_list.find { |a| a.ipv4? && !a.ipv4_loopback? && !a.ipv4_multicast? }&.ip_address
     skip "no non-loopback IPv4 address" unless lan_ip
@@ -540,10 +694,8 @@ class ProxyTest < Minitest::Test
   end
 
   def test_state_dir_tls_option_mints_sni_certs_and_stop_is_trap_safe
-    certs = Portless::Certs.ensure_certs(@dir)
-    tls = { cert: File.read(certs[:cert_path]), key: File.read(certs[:key_path]), ca: File.read(certs[:ca_path]), state_dir: @dir }
     backend = echo_backend
-    port = start_proxy([ route("app.localhost", backend) ], tls: tls)
+    port = start_proxy([ route("app.localhost", backend) ], tls: true)
     assert_equal "200", http(port, "app.localhost", tls: true).code
     assert File.exist?(File.join(@dir, "host-certs", "app_localhost.pem"))
 
@@ -552,26 +704,5 @@ class ProxyTest < Minitest::Test
     Timeout.timeout(5) { proxy.run }
   ensure
     trap("USR2", previous || "DEFAULT")
-  end
-
-  # --- RouteCache -----------------------------------------------------------------
-
-  def test_route_cache_drops_dead_owners_and_keeps_the_last_good_table
-    store = Portless::RouteStore.new(@dir)
-    child = spawn("sleep 30")
-    store.add_route(hostname: "a.localhost", port: 1, pid: child)
-    store.add_route(hostname: "b.localhost", port: 2, pid: 0)
-    warnings = []
-    cache = Portless::Proxy::RouteCache.new(store, on_warning: ->(m) { warnings << m })
-    assert_equal %w[a.localhost b.localhost], cache.call.map(&:hostname)
-    Process.kill("KILL", child)
-    Process.wait(child)
-    assert_equal %w[b.localhost], cache.call.map(&:hostname)
-
-    File.write(store.routes_path, "corrupt!")
-    assert_equal %w[b.localhost], cache.call.map(&:hostname)
-    assert_equal 1, warnings.size
-    cache.call
-    assert_equal 1, warnings.size
   end
 end

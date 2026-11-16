@@ -31,10 +31,6 @@ class LanTest < Minitest::Test
     assert_nil L.local_network_ip(probe: -> { raise Errno::ENETUNREACH }, rows: [ row ])
   end
 
-  def test_detect_prefers_override
-    assert_equal "10.9.9.9", L.detect("10.9.9.9")
-  end
-
   def test_mdns_commands
     assert_equal [ "dns-sd", "-P", "api.myapp", "_http._tcp", "local", "1355", "api.myapp.local", "10.0.0.2" ],
                  M.build_command("api.myapp.local", 1355, "10.0.0.2", "darwin")
@@ -73,17 +69,19 @@ class LanTest < Minitest::Test
     assert_equal count, errors.size
   end
 
+  def published = M.instance_variable_get(:@publishers).keys
+
   def test_publish_tracks_children
     skip "no sleep binary" unless Portless.which("sleep")
     M.stub(:build_command, ->(*) { %w[sleep 5] }) do
       M.publish("a.local", 443, "10.0.0.2")
       M.publish("a.local", 443, "10.0.0.2")
-      assert_equal [ "a.local" ], M.published
+      assert_equal [ "a.local" ], published
       M.unpublish("a.local")
-      assert_empty M.published
+      assert_empty published
       M.publish("b.local", 443, "10.0.0.2")
       M.cleanup_all
-      assert_empty M.published
+      assert_empty published
     end
   end
 end

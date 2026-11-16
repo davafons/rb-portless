@@ -45,7 +45,7 @@ module Portless
     end
 
     def parse_port_value(value, source)
-      Daemon.parse_port(value) || raise(Error, "#{source} must be a number between 1 and 65535.")
+      Utils.parse_port(value) || raise(Error, "#{source} must be a number between 1 and 65535.")
     end
 
     def resolve_service_path(value)
@@ -68,40 +68,6 @@ module Portless
       SERVICE_ENV_KEYS.each_with_object({}) { |key, acc| acc[key] = env[key] if env[key] && !env[key].empty? }
     end
 
-    # args.ts visitLeadingFlags (uses the CLI's Args when present).
-    def visit_leading_flags(command, args, spec, &visit)
-      return Args.visit_leading_flags(command, args, spec, &visit) if defined?(Args) && Args.respond_to?(:visit_leading_flags)
-
-      i = 0
-      while i < args.length
-        arg = args[i]
-        return args[(i + 1)..] if arg == "--"
-        return args[i..] if !arg.start_with?("-") || arg == "-"
-
-        eq = arg.start_with?("--") ? arg.index("=") : nil
-        flag = eq ? arg[0...eq] : arg
-        kind = spec[flag]
-        hint = [ "See: rb-portless #{command} --help" ]
-        unless kind
-          raise UsageError.new("Unknown flag \"#{flag}\" for rb-portless #{command}.",
-                               [ "Known flags: #{spec.keys.join(', ')}", *hint ])
-        end
-        if kind == :boolean
-          raise UsageError.new("#{flag} does not take a value.", hint) if eq
-
-          visit.call(flag, nil)
-        else
-          value = eq ? arg[(eq + 1)..] : args[i + 1]
-          raise UsageError.new("#{flag} requires a value.", hint) if value.nil? || value.empty? || (!eq && value.start_with?("-"))
-
-          visit.call(flag, value)
-          i += 1 unless eq
-        end
-        i += 1
-      end
-      []
-    end
-
     # service.ts parseServiceInstallConfig.
     def parse_install_config(args, env = ENV, allow_runtime_flags: false)
       config = default_config.merge(extra_env: collect_extra_env(env))
@@ -121,7 +87,7 @@ module Portless
       end
 
       if env["PORTLESS_TLD"] && !env["PORTLESS_TLD"].empty?
-        config[:tlds] = Daemon.normalize_tlds(Daemon.parse_tld_list(env["PORTLESS_TLD"], "PORTLESS_TLD"))
+        config[:tlds] = Daemon.normalize_tlds(Utils.parse_tld_list(env["PORTLESS_TLD"], "PORTLESS_TLD"))
         config[:tld] = Daemon.primary_tld(config[:tlds])
       end
 
@@ -143,10 +109,10 @@ module Portless
       tld_values = []
       spec = allow_runtime_flags ? INSTALL_FLAGS.merge(RUNTIME_FLAGS) : INSTALL_FLAGS
 
-      rest = visit_leading_flags("service install", tokens, spec) do |flag, value|
+      rest = Args.visit_leading_flags("service install", tokens, spec) do |flag, value|
         case flag
         when "-p", "--port"
-          port = Daemon.parse_port(value)
+          port = Utils.parse_port(value)
           raise UsageError.new("Invalid port number: #{value}", [ "Port must be between 1 and 65535." ]) unless port
 
           config[:proxy_port] = port
@@ -164,7 +130,7 @@ module Portless
           config[:lan_ip_explicit] = true
         when "--tld"
           begin
-            tld_values += Daemon.parse_tld_list(value)
+            tld_values += Utils.parse_tld_list(value)
           rescue Error => e
             raise UsageError.new(e.message, [ "See: rb-portless service install --help" ])
           end
@@ -469,11 +435,7 @@ module Portless
       exit(ok ? 0 : ($?&.exitstatus || 1))
     end
 
-    def run_cmd(*cmd, inherit: false)
-      if inherit
-        ok = system(*cmd)
-        return { status: ok.nil? ? nil : $?.exitstatus, stdout: "", stderr: "" }
-      end
+    def run_cmd(*cmd)
       out, errout, status = Open3.capture3(*cmd)
       { status: status.exitstatus, stdout: out, stderr: errout }
     rescue SystemCallError => e
@@ -515,7 +477,7 @@ module Portless
       ports = []
       begin
         state = Daemon.discover_state
-        ports << state[:port] if state[:port] != proxy_port && Daemon.proxy_running?(state[:port])
+        ports << state[:port] if state[:port] != proxy_port && Health.proxy_running?(state[:port])
       rescue StandardError
         nil
       end
@@ -530,7 +492,7 @@ module Portless
 
     def prepare_trust(state_dir)
       begin
-        Daemon.ensure_certs(state_dir)
+        Certs.ensure_certs(state_dir)
       rescue StandardError => e
         raise Error, "Failed to generate certificates in #{state_dir}. Ensure OpenSSL is installed.\n#{e.message}"
       end
@@ -555,24 +517,6 @@ module Portless
 
       raise Error, "LAN mode requires mDNS publishing, which is not supported on this platform." \
                    "#{support[:reason] ? "\n#{support[:reason]}" : ''}"
-    end
-
-    # CLI entry point: install flags as keywords (nil/false = not given).
-    def install(port: nil, https: nil, no_tls: nil, lan: nil, ip: nil, tlds: nil, wildcard: nil,
-                unprivileged: nil, cert: nil, key: nil, state_dir: nil)
-      args = %w[service install]
-      args.push("--port", port.to_s) if port
-      args << "--https" if https
-      args << "--no-tls" if no_tls
-      args << "--lan" if lan
-      args.push("--ip", ip) if ip
-      Array(tlds).each { |tld| args.push("--tld", tld) }
-      args << "--wildcard" if wildcard
-      args << "--unprivileged" if unprivileged
-      args.push("--cert", cert) if cert
-      args.push("--key", key) if key
-      args.push("--state-dir", state_dir) if state_dir
-      install_from_args(args)
     end
 
     def install_from_args(args)
@@ -655,18 +599,10 @@ module Portless
       { removed: false, installed: installed, error: e.message, needs_elevation: installed && removal_needs_elevation?(e) }
     end
 
-    # Is a boot service on disk? (world-readable; never needs sudo)
-    def installed?
-      spec = current_spec
-      File.exist?(spec[:platform] == "darwin" ? spec[:plist_path] : spec[:unit_path])
-    rescue StandardError
-      false
-    end
-
     def status_info
       spec = current_spec
       config = read_installed_config(spec) || spec[:config]
-      proxy_running = Daemon.proxy_running?(config[:proxy_port], config[:use_https])
+      proxy_running = Health.proxy_running?(config[:proxy_port], config[:use_https])
       if spec[:platform] == "darwin"
         installed = File.exist?(spec[:plist_path])
         result = run_cmd("launchctl", "print", "system/#{spec[:label]}")

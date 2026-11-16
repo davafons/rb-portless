@@ -62,6 +62,13 @@ class ShareTest < Minitest::Test
     assert_match(/authentication is not configured.*\(exit 1\)\z/, err.message)
   end
 
+  def test_start_ngrok_reports_the_node_signal_name
+    err = assert_raises(Portless::Error) do
+      T.start_tunnel(T.ngrok, 4000, spawner: script_spawner("Process.kill('TERM', Process.pid); sleep 5"))
+    end
+    assert_match(/\(signal SIGTERM\)\z/, err.message)
+  end
+
   def test_start_ngrok_missing_binary
     err = assert_raises(Portless::Error) { T.start_tunnel(T.ngrok, 4000, spawner: ->(_) { raise Errno::ENOENT }) }
     assert_match(/ngrok CLI not found/, err.message)

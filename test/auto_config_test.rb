@@ -157,6 +157,36 @@ class AutoConfigTest < Minitest::Test
     assert_equal %w[a b], Portless::Workspace.parse_pnpm_workspace_yaml("packages: ['a', \"b\"]\n")
   end
 
+  def test_workspace_globs_skip_symlinked_dirs
+    Dir.mktmpdir do |root|
+      write_json(root, "package.json", { "workspaces" => [ "apps/*" ] })
+      write_json(File.join(root, "apps/web"), "package.json", { "name" => "web" })
+      write_json(File.join(root, "elsewhere"), "package.json", { "name" => "linked" })
+      File.symlink(File.join(root, "elsewhere"), File.join(root, "apps/linked"))
+      assert_equal [ "web" ], Portless::Workspace.discover_workspace_packages(root).map(&:name)
+    end
+  end
+
+  def test_integral_float_app_port_is_accepted
+    Dir.mktmpdir do |dir|
+      File.write(File.join(dir, "portless.json"), '{ "appPort": 3000.0, "apps": { "web": { "appPort": 3e3 } } }')
+      config = Portless::Config.load_config(dir).config
+      assert_equal [ 3000, 3000 ], [ config["appPort"], config.dig("apps", "web", "appPort") ]
+      assert_kind_of Integer, config["appPort"]
+      File.write(File.join(dir, "portless.json"), '{ "appPort": 3000.5 }')
+      assert_raises(Portless::ConfigValidationError) { Portless::Config.load_config(dir) }
+    end
+  end
+
+  def test_locale_compare_key_matches_icu_order
+    labels = [ "Beta", "beta", "@scope/web", "Admin", "api", "web-2", "web_1", "web1", "Web", "a.b", "a-b", "a b",
+               "_x", "-x", "zeta", "\u00C1pple", "apple", "10", "9" ]
+    # Node: labels.sort((a, b) => a.localeCompare(b))
+    expected = [ "_x", "-x", "@scope/web", "10", "9", "a b", "a-b", "a.b", "Admin", "api", "apple", "\u00C1pple",
+                 "beta", "Beta", "Web", "web_1", "web-2", "web1", "zeta" ]
+    assert_equal expected, labels.sort_by { |l| Portless::Utils.locale_compare_key(l) }
+  end
+
   def test_turbo_manifest_and_node_options
     Dir.mktmpdir do |dir|
       t = Portless::Turbo

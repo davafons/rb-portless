@@ -47,10 +47,26 @@ module Portless
       {}
     end
 
+    # CA env for a child under a TLS proxy: NODE_EXTRA_CA_CERTS (upstream; the
+    # single-app run keeps a user's value, multi-app overrides it) and the
+    # Ruby analogue SSL_CERT_FILE (combined bundle, CaBundle) under the same
+    # conditions, never replacing a user's SSL_CERT_FILE.
+    def ca_env(state_dir, tls, override_node_ca: false)
+      ca_path = File.join(state_dir, "ca.pem")
+      return {} unless tls && File.exist?(ca_path)
+
+      env = {}
+      env["NODE_EXTRA_CA_CERTS"] = ca_path if override_node_ca || !ENV["NODE_EXTRA_CA_CERTS"]
+      bundle = !ENV["SSL_CERT_FILE"] && CaBundle.path
+      env["SSL_CERT_FILE"] = bundle if bundle
+      env
+    end
+
     # Runs the command and returns the exit code the CLI should exit with.
     # env: overrides merged over ENV (nil unsets). Callbacks: on_spawn(pid),
-    # on_exit(pid, code) (only on a natural exit), on_cleanup.
-    def spawn_command(command_args, env: {}, on_spawn: nil, on_exit: nil, on_cleanup: nil, cwd: nil)
+    # on_exit(pid, code) (only on a natural exit), on_signal (an INT/TERM/HUP
+    # arrived; runs in the trap handler), on_cleanup.
+    def spawn_command(command_args, env: {}, on_spawn: nil, on_exit: nil, on_signal: nil, on_cleanup: nil, cwd: nil)
       child_env = unbundled_overrides.merge(env)
       merged_path_source = ENV.to_h.merge(child_env.compact)
       child_env["PATH"] = augmented_path(merged_path_source, cwd || Dir.pwd)
@@ -59,6 +75,7 @@ module Portless
       previous = {}
       FORWARDED_SIGNALS.each do |sig|
         previous[sig] = trap(sig) do
+          on_signal&.call
           writer.write_nonblock(sig[0])
         rescue StandardError
           nil

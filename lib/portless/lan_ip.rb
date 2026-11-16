@@ -83,12 +83,5 @@ module Portless
     rescue StandardError
       nil
     end
-
-    # Back-compat: explicit override wins, else auto-detect.
-    def detect(override = nil)
-      return override if override.to_s.strip != ""
-
-      local_network_ip
-    end
   end
 end

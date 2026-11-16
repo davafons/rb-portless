@@ -19,7 +19,7 @@ module Portless
     # we pass to the sudo'd daemon) is always respected. resolveStateDir.
     def dir
       env = ENV["PORTLESS_STATE_DIR"]
-      return File.expand_path(env) if env && !env.empty?
+      return env if env && !env.empty?
 
       File.join(resolve_user_home, File.basename(Constants::DEFAULT_STATE_DIR))
     end
@@ -60,44 +60,21 @@ module Portless
       dir
     end
 
-    # File locations (1:1 with portless's state files).
-    def routes_file = path("routes.json")
-    def routes_lock = path("routes.lock")
-    def proxy_pid_file = path("proxy.pid")
-    def proxy_port_file = path("proxy.port")
-    def proxy_start_file = path("proxy.start")
-    def proxy_lan_file = path("proxy.lan")
-    def proxy_tls_file = path("proxy.tls")
-    def proxy_tld_file = path("proxy.tld")
-    def proxy_tlds_file = path("proxy.tlds")
-    def proxy_unprivileged_file = path("proxy.unprivileged")
-    def proxy_custom_cert_file = path("proxy.custom-cert")
-    def proxy_log = path("proxy.log")
     def ca_cert = path("ca.pem")
-    def ca_key = path("ca-key.pem")
-    def ca_trusted_marker = path("ca.trusted")
-    def host_certs_dir = path("host-certs")
 
     # When we wrote files while elevated (root), hand them back to the invoking
     # user so the unprivileged CLI can still read/write them. Keyed on the
-    # SUDO_UID/SUDO_GID sudo exposes. No-op unless running as root. Symlinks are
-    # never followed (utils.ts fixOwnership); directories are fixed recursively.
-    def fix_ownership(*targets)
-      return if Constants::WINDOWS || !(Process.respond_to?(:uid) && Process.uid.zero?)
+    # SUDO_UID/SUDO_GID sudo exposes. No-op unless running as root. Only the
+    # given paths, never following symlinks. utils.ts fixOwnership.
+    def fix_ownership(*paths)
+      return if Constants::WINDOWS || !Process.uid.zero?
 
       uid = Integer(ENV["SUDO_UID"].to_s, exception: false)
       return unless uid
 
       gid = Integer(ENV["SUDO_GID"].to_s, exception: false) || uid
-      targets = [ dir ] if targets.empty?
-      targets.each do |target|
-        next if File.symlink?(target)
-
-        if File.directory?(target)
-          FileUtils.chown_R(uid, gid, target, force: true)
-        else
-          File.lchown(uid, gid, target)
-        end
+      paths.each do |path|
+        File.lchown(uid, gid, path) unless File.lstat(path).symlink?
       rescue StandardError
         nil # best-effort
       end
@@ -244,8 +221,8 @@ module Portless
     # A sentence fragment saying why a state dir is refused, or nil when safe.
     # utils.ts explainUnsafeStateDir.
     def explain_unsafe_state_dir(target = dir) = describe_problem(locate(target)[1])
-    alias explain_unsafe explain_unsafe_state_dir
-    module_function :explain_unsafe
+    # Kept for cli.rb's trust handler until it calls explain_unsafe_state_dir.
+    def explain_unsafe(target = dir) = explain_unsafe_state_dir(target)
 
     # Create the dir if missing and make it owner-writable only; returns why it
     # is still unsafe, or nil. utils.ts ensureStateDir.
@@ -263,7 +240,7 @@ module Portless
         rescue SystemCallError
           nil
         end
-        fix_ownership(canonical) if Process.uid.zero?
+        fix_ownership(canonical)
         return nil
       end
       describe_problem(problem)
@@ -277,7 +254,5 @@ module Portless
 
       target
     end
-    alias require_dir! require_state_dir
-    module_function :require_dir!
   end
 end

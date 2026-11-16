@@ -71,26 +71,45 @@ module Portless
     # One RouteMapping. `upstream` is `{ tls: bool?, host: String? }` (symbol
     # keys). Unknown on-disk keys ride along in `extra` so a write never drops
     # what a newer version recorded.
+    #
+    # Serialized like a JS object: keys read from disk keep their order, keys
+    # set since then follow in the order routes.ts assigns them (FIELDS order),
+    # and `retired` (added by `{ ...route, retired: true }`) comes last.
     Route = Struct.new(*FIELDS.keys, :extra, keyword_init: true) do
+      attr_accessor :key_order
+
       def self.from_h(hash)
         attrs = FIELDS.to_h { |reader, key| [ reader, hash[key] ] }
         if attrs[:upstream].is_a?(Hash)
           attrs[:upstream] = attrs[:upstream].to_h { |k, v| [ k.to_sym, v ] }
         end
-        new(**attrs, extra: hash.reject { |key, _| FIELDS.value?(key) })
+        new(**attrs, extra: hash.reject { |key, _| FIELDS.value?(key) }).tap { |route| route.key_order = hash.keys }
       end
 
       def alias? = pid.to_i.zero?
 
       def to_h
+        order = key_order || []
+        extras = extra || {}
         out = {}
-        FIELDS.each do |reader, key|
-          value = self[reader]
-          next if value.nil?
-
-          out[key] = reader == :upstream ? value.to_h { |k, v| [ k.to_s, v ] } : value
+        order.each do |key|
+          if (reader = FIELDS.key(key))
+            out[key] = json_value(reader) unless self[reader].nil?
+          elsif extras.key?(key)
+            out[key] = extras[key]
+          end
         end
-        out.merge(extra || {})
+        (FIELDS.keys - [ :retired ] + [ :retired ]).each do |reader|
+          key = FIELDS[reader]
+          out[key] = json_value(reader) unless order.include?(key) || self[reader].nil?
+        end
+        extras.each { |key, value| out[key] = value unless order.include?(key) }
+        out
+      end
+
+      def json_value(reader)
+        value = self[reader]
+        reader == :upstream ? value.to_h { |k, v| [ k.to_s, v ] } : value
       end
 
       def to_json(*args) = to_h.to_json(*args)
@@ -123,10 +142,10 @@ module Portless
     end
 
     class << self
+      # net.isIPv4: four dotted decimal octets, 0-255, no leading zeros.
       def ipv4?(value)
-        IPAddr.new(value).ipv4? && value.split(".").size == 4
-      rescue IPAddr::Error
-        false
+        value.match?(/\A\d{1,3}(\.\d{1,3}){3}\z/) &&
+          value.split(".").all? { |octet| octet.to_i <= 255 && octet == octet.to_i.to_s }
       end
 
       def ipv6?(value)
@@ -160,35 +179,23 @@ module Portless
 
     attr_reader :dir
 
-    def initialize(dir = nil, on_warning: nil, file: nil, lock: nil)
-      @dir = dir || (file ? File.dirname(file) : State.dir)
-      @routes_path = file || File.join(@dir, "routes.json")
-      @lock_path = lock || File.join(@dir, "routes.lock")
+    def initialize(dir = nil, on_warning: nil)
+      @dir = dir || State.dir
+      @routes_path = File.join(@dir, "routes.json")
+      @lock_path = File.join(@dir, "routes.lock")
       @on_warning = on_warning
     end
 
     def routes_path = @routes_path
-    alias get_routes_path routes_path
     def pid_path = File.join(@dir, "proxy.pid")
     def port_file_path = File.join(@dir, "proxy.port")
     def start_time_path = File.join(@dir, "proxy.start")
 
-    def ensure_dir
-      if State.respond_to?(:require_state_dir)
-        State.require_state_dir(@dir)
-      else
-        FileUtils.mkdir_p(@dir, mode: 0o755)
-      end
-    end
+    def ensure_dir = State.require_state_dir(@dir)
 
     # Why what this directory records must not be acted on, or nil when only its
     # owner can change it. A directory that does not exist yet records nothing.
-    def untrusted_reason
-      return nil unless File.exist?(@dir)
-      return nil unless State.respond_to?(:explain_unsafe_state_dir)
-
-      State.explain_unsafe_state_dir(@dir)
-    end
+    def untrusted_reason = File.exist?(@dir) ? State.explain_unsafe_state_dir(@dir) : nil
 
     # Routes for the proxy to serve. Raises when untrusted_reason rejects the dir.
     def load_trusted_routes
@@ -204,11 +211,9 @@ module Portless
     # The routes a caller should act on: entries whose portless process is
     # still alive, plus aliases. Stale entries stay in the file for `prune`.
     def load_routes = read_route_file.reject { |route| stale?(route) }
-    alias routes load_routes
 
     # All valid routes without filtering dead pids, active entries first.
     def load_routes_raw = read_route_file
-    alias all_routes load_routes_raw
 
     # Return routes whose owners are dead without removing them from storage.
     def find_stale_routes
@@ -235,7 +240,7 @@ module Portless
           # --force: kill the existing process before taking over; an alias has none.
           unless existing.alias?
             begin
-              Process.kill("TERM", existing.pid.to_i) if existing.pid.to_i.positive?
+              Process.kill("TERM", existing.pid.to_i)
               killed_pid = existing.pid
             rescue StandardError
               nil # exited between the check and the kill
@@ -304,18 +309,6 @@ module Portless
       end
     end
 
-    # Contract alias: update only while `pid` (when given) still owns the route.
-    def update_route_metadata(hostname, pid, patch)
-      fields = normalize_patch(patch)
-      mutate_routes do |routes|
-        route = find_active_route(routes, hostname)
-        next [ nil, false ] unless route && (pid.nil? || route.pid == pid)
-
-        fields.each { |key, value| route[key] = value }
-        [ nil, true ]
-      end
-    end
-
     # Hand a route over to another process, only while `from_pid` still owns it.
     def transfer_route(hostname, from_pid, to_pid)
       mutate_routes do |routes|
@@ -342,12 +335,6 @@ module Portless
         changed = routes.size != before
         [ changed, changed ]
       end
-    end
-
-    # Drop every stale record and return them (callers reap orphans first via
-    # find_stale_routes when they need to).
-    def prune
-      find_stale_routes.select { |route| remove_stale_route(route.hostname, route.pid) }
     end
 
     private
@@ -454,7 +441,6 @@ module Portless
         File.open(temp_path, File::WRONLY | File::CREAT | File::EXCL, FILE_MODE) do |f|
           f.write(JSON.pretty_generate(order_active_first(routes).map(&:to_h) + skipped))
         end
-        File.chmod(FILE_MODE, temp_path)
         State.fix_ownership(temp_path)
         File.rename(temp_path, @routes_path)
       rescue StandardError

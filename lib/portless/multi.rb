@@ -33,7 +33,7 @@ module Portless
       check_turbo_forwarding(script_name) if use_turbo && !@extra_args.empty? && Config.script?(script_name, @ws_root)
 
       project = project_name(loaded, packages)
-      env_app_port = cli.app_port_from_env
+      env_app_port = CLI.app_port_from_env
       worktrees = {}
       worktree_for = lambda do |wt|
         style = wt&.dig("prefix") || "last-segment"
@@ -57,12 +57,12 @@ module Portless
         next if raw.empty?
 
         pm = Config.detect_package_manager(pkg.dir)
-        forwarded = use_turbo ? [] : cli.forward_script_extra_args(effective_script, pkg.dir, @extra_args)
+        forwarded = use_turbo ? [] : CLI.forward_script_extra_args(effective_script, pkg.dir, @extra_args)
         command_args = Config.script_run_command(pm, effective_script, pkg.dir, forwarded)
         proxied = override.key?("proxy") ? override["proxy"] : Config.server_command?(raw)
 
         if override["name"]
-          name = cli.truncate_name(override["name"])
+          name = CLI.truncate_name(override["name"])
           label = override["name"]
         else
           pkg_label = pkg.name ? Auto.sanitize_for_hostname(pkg.name) : ""
@@ -81,7 +81,7 @@ module Portless
         return 1
       end
 
-      apps.sort_by!(&:label)
+      apps = apps.sort_by.with_index { |a, i| [ Utils.locale_compare_key(a.label), i ] }
       proxied_apps = apps.select(&:proxied)
       task_apps = apps.reject(&:proxied)
       if env_app_port && proxied_apps.length > 1
@@ -93,12 +93,22 @@ module Portless
       end
 
       $stderr.write(Colors.bold("\nrb-portless\n", io: $stderr), "\n")
-      state = CLI.discover_state
+      state = Daemon.discover_state
       if proxied_apps.any?
         desired = Daemon.resolve_desired_state(false)
+        # Check collisions before starting the proxy so a config mistake cannot
+        # leave a proxy behind. A running proxy keeps its own TLDs; a stopped
+        # one starts with the persisted/env merge, LAN normalized to .local.
+        preflight_tlds = state.tlds
+        unless Daemon.proxy_up?(state.port, state.tls)
+          start_config = Daemon.resolve_start(desired)[:start_config]
+          preflight_tlds = start_config.lan_mode ? [ "local" ] : start_config.tlds
+        end
+        check_hostname_collisions(proxied_apps, preflight_tlds)
+
         result = Daemon.ensure_proxy_running(state.port, state.tls, desired)
-        state = result[:started] ? CLI.state_struct(result[:state]) : CLI.discover_state
-        check_hostname_collisions(proxied_apps, state.tlds)
+        state = result[:started] ? result[:state] : Daemon.discover_state
+        check_hostname_collisions(proxied_apps, state.tlds) if state.tlds != preflight_tlds
         CLI.handle_trust if state.tls && !Trust.trusted?(state.dir)
       end
 
@@ -110,8 +120,6 @@ module Portless
     end
 
     private
-
-    def cli = @cli ||= CLI.new([])
 
     def check_turbo_forwarding(script_name)
       forwarding = Frameworks.resolve_turbo_root_forwarding(script_name, @ws_root)
@@ -134,7 +142,7 @@ module Portless
     end
 
     def project_name(loaded, packages)
-      return cli.truncate_name(loaded.config["name"]) if loaded&.config&.dig("name")
+      return CLI.truncate_name(loaded.config["name"]) if loaded&.config&.dig("name")
 
       counts = packages.filter_map(&:scope).tally
       common = counts.max_by { |_, c| c }&.first
@@ -159,12 +167,7 @@ module Portless
     def app_env(state, port, url)
       env = { "PORT" => port.to_s, "HOST" => "127.0.0.1", "PORTLESS_URL" => url,
               "__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS" => Runner.format_vite_allowed_hosts(state.tlds) }
-      ca = File.join(state.dir, "ca.pem")
-      env["NODE_EXTRA_CA_CERTS"] = ca if state.tls && File.exist?(ca)
-      if state.tls && !ENV["SSL_CERT_FILE"] && (bundle = CaBundle.path)
-        env["SSL_CERT_FILE"] = bundle
-      end
-      env
+      env.merge(RunSupport.ca_env(state.dir, state.tls, override_node_ca: true))
     end
 
     def print_urls(app_urls)
@@ -175,10 +178,8 @@ module Portless
       warn ""
     end
 
-    def new_store(dir) = RouteStore.new(dir, on_warning: ->(msg) { warn Colors.yellow(msg, io: $stderr) })
-
     def run_with_turbo(state, script_name, proxied_apps)
-      store = new_store(state.dir)
+      store = Utils.new_route_store(state.dir)
       manifest = {}
       routes = []
       app_urls = []
@@ -192,6 +193,7 @@ module Portless
         url = Utils.format_url(hostnames.first, state.port, state.tls)
         app_urls << [ app.label, url ]
         Runner.add_routes(store, hostnames, port, Process.pid)
+        CLI.report_hosts_sync_here(hostnames, state.port, state.tls, state.lan_mode)
         routes << hostnames
         manifest[app.pkg.dir] = app_env(state, port, url)
       end
@@ -209,7 +211,7 @@ module Portless
 
       env = RunSupport.unbundled_overrides.merge("NODE_OPTIONS" => Turbo.build_node_options)
       pid = Process.spawn(env, *turbo_args, chdir: @ws_root, pgroup: true)
-      code = wait_children([ pid ]) { cleanup_routes(store, routes) }.values.first
+      code = wait_children({ pid => nil }) { cleanup_routes(store, routes) }.values.first
       cleanup_routes(store, routes)
       Turbo.remove_manifest
       code.nil? || code.zero? ? 0 : code
@@ -218,39 +220,44 @@ module Portless
     def cleanup_routes(store, routes) = routes.each { |h| Runner.remove_routes(store, h, Process.pid) }
 
     def run_with_direct_spawn(state, proxied_apps, task_apps)
-      store = new_store(state.dir)
       children = {}
       routes = []
       app_urls = []
       proxied_apps.each do |app|
         env = RunSupport.unbundled_overrides
         env["PATH"] = RunSupport.augmented_path(ENV, app.pkg.dir)
+        route = nil
         if app.command_args[0] == "rb-portless"
           app_urls << [ app.label, "(managed by rb-portless)" ]
         else
+          store = RouteStore.new(state.dir, on_warning: ->(msg) { warn Colors.yellow("[#{app.name}] #{msg}", io: $stderr) })
           port = app.app_port || FreePort.find
           hostnames = Runner.build_hostnames(app.name, state.tlds)
           url = Utils.format_url(hostnames.first, state.port, state.tls)
           Runner.add_routes(store, hostnames, port, Process.pid)
-          routes << hostnames
+          CLI.report_hosts_sync_here(hostnames, state.port, state.tls, state.lan_mode)
+          route = { store: store, hostnames: hostnames, port: port, preexisting: Runner.find_preexisting_listener(port) }
+          routes << route
           env.merge!(app_env(state, port, url))
           app_urls << [ app.label, url ]
         end
-        children[spawn_prefixed(app, env)] = app
+        children[spawn_prefixed(app, env)] = { app: app, route: route }
       end
       task_apps.each do |app|
         env = RunSupport.unbundled_overrides.merge("PATH" => RunSupport.augmented_path(ENV, app.pkg.dir))
-        children[spawn_prefixed(app, env)] = app
+        children[spawn_prefixed(app, env)] = { app: app }
       end
       print_urls(app_urls)
 
-      codes = wait_children(children.keys) { nil }
-      cleanup_routes(store, routes)
+      codes = wait_children(children) do
+        routes.each { |r| Runner.remove_routes(r[:store], r[:hostnames], Process.pid) }
+      end
+      @output_threads&.each { |t| t.join(1) } # drain the last prefixed lines
       failed = codes.reject { |_, c| c.nil? || c.zero? }
       return 0 if failed.empty?
 
       warn Colors.red("\n#{failed.length} app#{failed.length == 1 ? '' : 's'} exited with errors: " \
-                      "#{failed.map { |pid, c| "#{children[pid].label} (#{c})" }.join(', ')}", io: $stderr)
+                      "#{failed.map { |pid, c| "#{children[pid][:app].label} (#{c})" }.join(', ')}", io: $stderr)
       1
     end
 
@@ -261,26 +268,50 @@ module Portless
                                                   pgroup: true)
       out_w.close
       err_w.close
-      prefix = "[#{app.name}]"
       [ [ out_r, $stdout ], [ err_r, $stderr ] ].each do |io, target|
-        Thread.new do
+        prefix = app.proxied ? Colors.cyan("[#{app.name}]", io: target) : Colors.gray("[#{app.name}]", io: target)
+        (@output_threads ||= []) << Thread.new do
           io.each_line { |line| target.write("#{prefix} #{line.chomp}\n") }
         rescue IOError
           nil
         end
       end
-      @labels ||= {}
-      @labels[pid] = app.name
       pid
     end
 
-    # Waits for all children; INT/TERM/HUP → TERM the trees, KILL after 5s.
-    # => {pid => exit code (nil when signalled)}
-    def wait_children(pids)
-      codes = {}
+    # A child exited: report it, then (spawnProxiedApp) hand its routes to a
+    # self-daemonized server or drop them right away.
+    def child_exited(pid, status, child)
+      app = child[:app]
+      if status.exitstatus && status.exitstatus != 0
+        warn Colors.red("[#{app.name}] exited with code #{status.exitstatus}", io: $stderr)
+      elsif status.signaled?
+        warn Colors.yellow("[#{app.name}] killed by SIG#{Signal.signame(status.termsig)}", io: $stderr)
+      end
+      route = child[:route] or return
+      begin
+        unless status.signaled?
+          Runner.transfer_routes_to_daemon(route[:store], route[:hostnames], route[:port], pid, route[:preexisting],
+                                           status.exitstatus.zero?)
+        end
+      rescue StandardError
+        nil
+      end
+      Runner.remove_routes(route[:store], route[:hostnames], Process.pid)
+    end
+
+    # Waits for all children ({pid => child info or nil}); INT/TERM/HUP → yield,
+    # TERM the trees, KILL after 5s. => {pid => exit code (nil when signalled)}
+    def wait_children(children)
       reader, writer = IO.pipe
       previous = %w[INT TERM HUP].to_h { |s| [ s, trap(s) { writer.write_nonblock("x") rescue nil } ] }
-      waiters = pids.to_h { |pid| [ pid, Thread.new { Process.wait2(pid).last } ] }
+      waiters = children.to_h do |pid, child|
+        [ pid, Thread.new do
+          status = Process.wait2(pid).last
+          child_exited(pid, status, child) if child
+          status
+        end ]
+      end
       deadline = nil
       until waiters.values.none?(&:alive?)
         if IO.select([ reader ], nil, nil, 0.05) && deadline.nil?
@@ -294,17 +325,7 @@ module Portless
           deadline = Float::INFINITY
         end
       end
-      waiters.each do |pid, t|
-        status = t.value
-        app = @labels&.[](pid)
-        if status.exitstatus && status.exitstatus != 0 && app
-          warn Colors.red("[#{app}] exited with code #{status.exitstatus}", io: $stderr)
-        elsif status.signaled? && app
-          warn Colors.yellow("[#{app}] killed by SIG#{Signal.signame(status.termsig)}", io: $stderr)
-        end
-        codes[pid] = status.exitstatus
-      end
-      codes
+      waiters.transform_values { |t| t.value.exitstatus }
     ensure
       previous&.each { |s, h| trap(s, h || "DEFAULT") }
       reader&.close

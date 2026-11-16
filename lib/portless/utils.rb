@@ -26,6 +26,31 @@ module Portless
 
     SUFFIX_RISKY_TLDS = %w[local dev app].freeze
 
+    # ICU root collation order for spaces and punctuation, before digits and
+    # letters.
+    COLLATION_PUNCTUATION = " _-,;:!?.'\"()[]{}@*/\\&#%`^+<=>|~$"
+
+    # Sort key emulating JS String#localeCompare (ICU root collation) for
+    # labels: punctuation < digits < letters, case and accents only break ties
+    # (unaccented first, then lowercase first).
+    def locale_compare_key(text)
+      chars = text.to_s.unicode_normalize(:nfd).scan(/\X/)
+      primary = chars.map do |c|
+        base = c[0]
+        if (i = COLLATION_PUNCTUATION.index(base)) then [ 0, i ]
+        elsif base.match?(/\d/) then [ 1, base ]
+        else [ 2, base.downcase ]
+        end
+      end
+      [ primary, chars.map { |c| c.length > 1 ? 1 : 0 }, chars.map { |c| c[0] == c[0].downcase ? 0 : 1 } ]
+    end
+
+    # A RouteStore that prints its warnings in yellow on stderr (upstream's
+    # `new RouteStore(dir, { onWarning: (msg) => console.warn(colors.yellow(msg)) })`).
+    def new_route_store(dir)
+      RouteStore.new(dir, on_warning: ->(msg) { warn Colors.yellow(msg, io: $stderr) })
+    end
+
     def parse_port(value)
       trimmed = value.to_s.strip
       return nil unless trimmed.match?(/\A\d+\z/)

@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "test_helper"
+require "minitest/mock"
 
 # State-dir resolution and safety checks (ported from utils.test.ts).
 class StateTest < Minitest::Test
@@ -23,8 +24,30 @@ class StateTest < Minitest::Test
     env = ENV.to_h
     ENV["PORTLESS_STATE_DIR"] = "/tmp/custom-state"
     assert_equal "/tmp/custom-state", S.dir
+    ENV["PORTLESS_STATE_DIR"] = "rel/state"
+    assert_equal "rel/state", S.dir, "used as given, like resolveStateDir"
     ENV.delete("PORTLESS_STATE_DIR")
     assert_equal File.join(Dir.home, ".rb-portless"), S.dir
+  ensure
+    ENV.replace(env)
+  end
+
+  def test_fix_ownership_lchowns_only_the_given_paths
+    env = ENV.to_h
+    ENV["SUDO_UID"] = "501"
+    ENV["SUDO_GID"] = "20"
+    calls = []
+    Dir.mktmpdir do |dir|
+      File.write(File.join(dir, "child"), "x")
+      File.symlink(File.join(dir, "child"), File.join(dir, "link"))
+      Process.stub(:uid, 0) do
+        File.stub(:lchown, ->(*args) { calls << args }) do
+          S.fix_ownership(dir, File.join(dir, "link"))
+          S.fix_ownership
+        end
+      end
+      assert_equal [ [ 501, 20, dir ] ], calls
+    end
   ensure
     ENV.replace(env)
   end

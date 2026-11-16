@@ -98,13 +98,13 @@ class E2EProxyTest < Minitest::Test
   # Security: without --lan the proxy must NOT be reachable from the network —
   # on 0.0.0.0 every registered dev app is exposed to the whole LAN/VPN.
   def test_proxy_is_not_reachable_on_the_lan_interface_by_default
-    ip = Portless::LanIp.detect(nil)
+    ip = Portless::LanIp.local_network_ip
     skip "no LAN IPv4 on this machine" unless ip
 
     assert_raises(Errno::ECONNREFUSED, Errno::ETIMEDOUT) do
       TCPSocket.new(ip, E2E.proxy_port, connect_timeout: 2).close
     end
-    refute File.exist?(Portless::State.proxy_lan_file), "no LAN marker without --lan"
+    refute File.exist?(File.join(Portless::State.dir, "proxy.lan")), "no LAN marker without --lan"
   end
 
   def test_proxy_is_reachable_on_the_ipv6_loopback

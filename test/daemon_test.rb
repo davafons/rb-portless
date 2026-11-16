@@ -37,36 +37,36 @@ class DaemonTest < Minitest::Test
 
   # ── TLDs ──────────────────────────────────────────────────────────────
   def test_validate_tld
-    assert_nil D.validate_tld("test")
-    assert_nil D.validate_tld("dev.example.com")
-    assert_equal "TLD cannot be empty", D.validate_tld("")
-    assert_match(/labels cannot be empty/, D.validate_tld("a..b"))
-    assert_match(/lowercase letters/, D.validate_tld("-bad"))
-    assert_match(/63-character/, D.validate_tld("a" * 64))
-    assert_match(/253-character/, D.validate_tld("a." * 127 + "ab"))
+    assert_nil Portless::Utils.validate_tld("test")
+    assert_nil Portless::Utils.validate_tld("dev.example.com")
+    assert_equal "TLD cannot be empty", Portless::Utils.validate_tld("")
+    assert_match(/labels cannot be empty/, Portless::Utils.validate_tld("a..b"))
+    assert_match(/lowercase letters/, Portless::Utils.validate_tld("-bad"))
+    assert_match(/63-character/, Portless::Utils.validate_tld("a" * 64))
+    assert_match(/253-character/, Portless::Utils.validate_tld("a." * 127 + "ab"))
   end
 
   def test_parse_tld_list_dedupes_and_prefixes_source
-    assert_equal %w[test localhost], D.parse_tld_list(" Test, localhost ,test")
-    assert_empty D.parse_tld_list("  ")
-    err = assert_raises(Portless::Error) { D.parse_tld_list("ok,b@d", "PORTLESS_TLD") }
+    assert_equal %w[test localhost], Portless::Utils.parse_tld_list(" Test, localhost ,test")
+    assert_empty Portless::Utils.parse_tld_list("  ")
+    err = assert_raises(Portless::Error) { Portless::Utils.parse_tld_list("ok,b@d", "PORTLESS_TLD") }
     assert_match(/\APORTLESS_TLD: Invalid TLD "b@d"/, err.message)
   end
 
   def test_default_tlds_from_env
-    assert_equal [ "localhost" ], D.default_tlds
+    assert_equal [ "localhost" ], Portless::Utils.default_tlds
     ENV["PORTLESS_TLD"] = "test,dev.example.com"
-    assert_equal %w[test dev.example.com], D.default_tlds
+    assert_equal %w[test dev.example.com], Portless::Utils.default_tlds
     ENV["PORTLESS_TLD"] = "Bad_"
-    assert_raises(Portless::Error) { D.default_tlds }
+    assert_raises(Portless::Error) { Portless::Utils.default_tlds }
   end
 
   def test_risky_tld_reason
-    assert_match(/mDNS/, D.risky_tld_reason("local"))
-    assert_match(/HSTS/, D.risky_tld_reason("example.dev"))
-    assert_match(/public TLD/, D.risky_tld_reason("com"))
-    assert_nil D.risky_tld_reason("dev.example.com") # ownership-class risk is bare-only
-    assert_nil D.risky_tld_reason("test")
+    assert_match(/mDNS/, Portless::Utils.risky_tld_reason("local"))
+    assert_match(/HSTS/, Portless::Utils.risky_tld_reason("example.dev"))
+    assert_match(/public TLD/, Portless::Utils.risky_tld_reason("com"))
+    assert_nil Portless::Utils.risky_tld_reason("dev.example.com") # ownership-class risk is bare-only
+    assert_nil Portless::Utils.risky_tld_reason("test")
   end
 
   def test_tlds_file_round_trip_and_legacy_fallback
@@ -235,12 +235,6 @@ end
   end
 
   # ── health / discovery ───────────────────────────────────────────────
-  def test_proxy_running_requires_portless_header
-    with_fake_proxy(header: true) { |port| assert D.proxy_running?(port) }
-    with_fake_proxy(header: false) { |port| refute D.proxy_running?(port) }
-    refute D.proxy_running?(free_port)
-  end
-
   def test_discover_state_reads_markers_with_state_dir_override
     with_fake_proxy(header: true) do |port|
       File.write(File.join(@dir, "proxy.port"), port.to_s)
@@ -260,7 +254,7 @@ end
 
   # ── proxy stop ───────────────────────────────────────────────────────
   def test_stop_when_nothing_recorded
-    out, = capture_io { assert D.stop_proxy(nil, @dir, free_port) }
+    out, = capture_io { assert D.stop_proxy(@dir, free_port) }
     assert_match(/Proxy is not running/, out)
   end
 
@@ -269,7 +263,7 @@ end
     File.write(File.join(@dir, "proxy.pid"), pid.to_s)
     File.write(File.join(@dir, "proxy.port"), "1355")
     D.write_tls_marker(@dir, true)
-    out, = capture_io { assert D.stop_proxy(nil, @dir, 1355) }
+    out, = capture_io { assert D.stop_proxy(@dir, 1355) }
     assert_match(/no longer running/, out)
     refute File.exist?(File.join(@dir, "proxy.pid"))
     refute File.exist?(File.join(@dir, "proxy.tls"))
@@ -277,14 +271,14 @@ end
 
   def test_stop_removes_corrupt_pid_file
     File.write(File.join(@dir, "proxy.pid"), "garbage")
-    _, err = capture_io { assert D.stop_proxy(nil, @dir, 1355) }
+    _, err = capture_io { assert D.stop_proxy(@dir, 1355) }
     assert_match(/Corrupted PID file/, err)
   end
 
   def test_stop_refuses_unsafe_state_dir
     File.chmod(0o777, @dir)
     File.write(File.join(@dir, "proxy.pid"), Process.pid.to_s)
-    _, err = capture_io { refute D.stop_proxy(nil, @dir, 1355) }
+    _, err = capture_io { refute D.stop_proxy(@dir, 1355) }
     assert_match(/Cannot stop the proxy recorded in .*other users can write to it/, err)
     assert_match(/Nothing was signaled/, err)
   ensure
@@ -297,7 +291,7 @@ end
     File.write(File.join(@dir, "proxy.start"), "Mon Jan  1 00:00:00 2001")
     port = free_port
     File.write(File.join(@dir, "proxy.port"), port.to_s)
-    out, = capture_io { assert D.stop_proxy(nil, @dir, port) }
+    out, = capture_io { assert D.stop_proxy(@dir, port) }
     assert_match(/is not a proxy listening on port #{port}/, out)
     assert Portless::PortOwner.alive?(sleeper), "the unrelated process must survive"
     refute File.exist?(File.join(@dir, "proxy.pid"))
@@ -311,7 +305,7 @@ end
     with_fake_proxy(header: true) do |port|
       File.write(File.join(@dir, "proxy.pid"), sleeper.to_s)
       File.write(File.join(@dir, "proxy.start"), "Mon Jan  1 00:00:00 2001")
-      _, err = capture_io { refute D.stop_proxy(nil, @dir, port) }
+      _, err = capture_io { refute D.stop_proxy(@dir, port) }
       assert_match(/PID #{sleeper} .* is not the proxy answering on port #{port}/, err)
       assert File.exist?(File.join(@dir, "proxy.pid"))
     end
@@ -335,30 +329,63 @@ end
     Process.kill("KILL", pid) rescue nil # rubocop:disable Style/RescueModifier
   end
 
-  def test_stop_rejects_invalid_port
-    err = assert_raises(Portless::UsageError) { D.stop(port: "99999") }
-    assert_equal "Invalid port number: 99999", err.message
+  def test_stop_with_a_missing_state_dir_reports_not_running
+    missing = File.join(@dir, "missing")
+    out, = capture_io { assert D.stop_proxy(missing, free_port) }
+    assert_match(/Proxy is not running/, out)
   end
 
   # ── proxy start argument validation ──────────────────────────────────
-  def test_start_requires_cert_and_key_together
-    assert_raises(Portless::UsageError) { D.start(cert: "a.pem") }
-    err = assert_raises(Portless::UsageError) { D.start(port: "0") }
-    assert_equal [ "Port must be between 1 and 65535." ], err.hints
+  def test_proxy_start_usage_errors_are_caught_by_the_cli
+    _, err = capture_io { assert_equal 2, Portless::CLI.new(%w[proxy start --cert a.pem]).main }
+    assert_match(/--cert and --key must be used together/, err)
+    _, err = capture_io { assert_equal 2, Portless::CLI.new(%w[proxy start -p 0]).main }
+    assert_match(/Port must be between 1 and 65535/, err)
   end
 
   def test_start_refuses_sync_hosts_with_unprivileged
     ENV["PORTLESS_SYNC_HOSTS"] = "1"
-    _, err = capture_io { assert_raises(SystemExit) { D.start(port: free_port.to_s, unprivileged: true) } }
+    _, err = capture_io { assert_raises(SystemExit) { D.start(port: free_port, unprivileged: true) } }
     assert_match(/PORTLESS_SYNC_HOSTS=1 cannot be combined with unprivileged mode/, err)
   end
 
   def test_start_reports_already_running_with_restart_hint
     with_fake_proxy(header: true) do |port|
-      out, = capture_io { assert D.start(port: port.to_s) }
+      out, = capture_io { assert D.start(port: port) }
       assert_match(/Proxy is already running on port #{port}\./, out)
       assert_match(/To restart: rb-portless proxy stop -p #{port} && rb-portless proxy start -p #{port}/, out)
     end
+  end
+
+  def test_start_elevated_reports_the_sudo_failure_like_spawn_sync
+    config = resolve
+    store = Portless::RouteStore.new(@dir)
+    { Portless::Privilege::SpawnResult.new(nil, "spawnSync sudo ETIMEDOUT") => "spawnSync sudo ETIMEDOUT",
+      Portless::Privilege::SpawnResult.new(signaled_status, nil) => "terminated by signal SIGTERM" }.each do |result, failure|
+      _, err = capture_io do
+        Portless::Privilege.stub(:sudo, result) do
+          assert_raises(SystemExit) { D.start_elevated(store, 443, config, config, nil, false) }
+        end
+      end
+      assert_includes err, "but sudo elevation failed: #{failure}."
+    end
+  end
+
+  def test_spawn_daemon_lets_the_daemon_redetect_an_auto_lan_ip
+    spawned = nil
+    config = resolve(explicit: explicit(lan_mode: true), lan_mode: true)
+    capture_io do
+      Process.stub(:spawn, ->(*args, **) { spawned = args; 0 }) do
+        Process.stub(:detach, nil) do
+          D.stub(:wait_for_proxy, true) do
+            D.spawn_daemon(Portless::RouteStore.new(@dir), @dir, 1355, config, "10.0.0.5")
+          end
+        end
+      end
+    end
+    refute_kind_of Hash, spawned.first, "no PORTLESS_INTERNAL_LAN_IP for the child"
+    refute_includes spawned, "10.0.0.5"
+    assert_includes spawned, "--lan"
   end
 
   # ── hosts sync client ────────────────────────────────────────────────
@@ -412,6 +439,11 @@ end
     server.addr[1]
   ensure
     server&.close
+  end
+
+  def signaled_status
+    pid = Process.spawn(RbConfig.ruby, "-e", "Process.kill('TERM', Process.pid); sleep 5")
+    Process.wait2(pid).last
   end
 
   def spawn_and_reap

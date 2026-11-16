@@ -83,4 +83,19 @@ class TrustTest < Minitest::Test
   ensure
     FileUtils.rm_rf(anchors)
   end
+
+  def test_run_kills_the_child_on_timeout
+    started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    error = assert_raises(Portless::Error) { T.run!([ "sh", "-c", "echo $$ > #{@dir}/pid; exec sleep 30" ], 0.5) }
+    assert_equal "spawnSync sh ETIMEDOUT", error.message
+    assert_operator Process.clock_gettime(Process::CLOCK_MONOTONIC) - started, :<, 5
+    pid = File.read(File.join(@dir, "pid")).to_i
+    assert_raises(Errno::ESRCH) { Process.kill(0, pid) }
+  end
+
+  def test_run_failure_message_matches_exec_file_sync
+    error = assert_raises(Portless::Error) { T.run!([ "sh", "-c", "echo oops >&2; exit 3" ], 5) }
+    assert_equal "Command failed: sh -c echo oops >&2; exit 3\noops\n", error.message
+    assert_equal "out\n", T.run!([ "echo", "out" ], 5)
+  end
 end

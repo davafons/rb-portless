@@ -35,8 +35,6 @@ module Portless
       { supported: true }
     end
 
-    def supported? = supported[:supported]
-
     def command?(command) = Portless.which(command)
 
     # "api.myapp.local" → "api.myapp"
@@ -93,8 +91,6 @@ module Portless
         nil
       end
     end
-
-    def published = @mutex.synchronize { @publishers.keys }
 
     # Poll the default LAN IP and call on_change(next, previous) when it moves.
     # Used only for auto-detected LAN mode. mdns.ts startLanIpMonitor.

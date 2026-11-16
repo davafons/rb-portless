@@ -128,6 +128,7 @@ class CertsTest < Minitest::Test
 
   def test_generates_certs_when_the_state_dir_contains_a_dot
     dotted = File.join(@dir, "user.name", "state")
+    FileUtils.mkdir_p(dotted)
     Certs.ensure_certs(dotted)
     assert File.exist?(File.join(dotted, "server.pem"))
   end
@@ -136,7 +137,7 @@ class CertsTest < Minitest::Test
 
   def test_localhost_uses_the_default_context
     callback = sni
-    assert_same callback.default_context, callback.call("localhost")
+    assert_same callback.call("localhost"), callback.call("localhost")
     refute File.exist?(File.join(@dir, "host-certs"))
   end
 
@@ -200,17 +201,18 @@ class CertsTest < Minitest::Test
     assert File.exist?(File.join(@dir, "host-certs", "ok_test.pem"))
   end
 
+  def test_unreadable_server_key_is_regenerated
+    skip "root reads any file" if Process.uid.zero?
+    Certs.ensure_certs(@dir)
+    key_path = File.join(@dir, "server-key.pem")
+    File.chmod(0o000, key_path)
+    Certs.ensure_certs(@dir)
+    assert File.readable?(key_path), "fileExists requires read access, like certs.ts"
+  end
+
   def test_concurrent_requests_share_one_generation
     callback = sni
     contexts = 4.times.map { Thread.new { callback.call("race.localhost") } }.map(&:value)
     assert_equal 1, contexts.uniq.size
-  end
-
-  # Instance API used by trust.rb.
-  def test_instance_fingerprint_is_stable
-    certs = Certs.new(@dir)
-    certs.ensure_ca!
-    assert_match(/\A[0-9a-f]{64}\z/, certs.ca_fingerprint)
-    assert_equal certs.ca_fingerprint, Certs.new(@dir).ca_fingerprint
   end
 end

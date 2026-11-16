@@ -37,7 +37,8 @@ module Portless
     # RFC 6455: Sec-WebSocket-Accept = base64(sha1(key + GUID)).
     WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
-    # Hop-by-hop headers forbidden in HTTP/2 responses (proxy.ts HOP_BY_HOP_HEADERS).
+    # Hop-by-hop headers forbidden in HTTP/2 responses (proxy.ts HOP_BY_HOP_HEADERS),
+    # stripped from responses to requests that arrived over TLS.
     HOP_BY_HOP_HEADERS = %w[connection keep-alive proxy-connection transfer-encoding upgrade].freeze
     # Client hop-by-hop headers dropped before forwarding a plain request. Node
     # keeps transfer-encoding to frame the streamed body; async-http frames the
@@ -50,37 +51,78 @@ module Portless
     UPSTREAM_CONNECT_TIMEOUT = 10
     REPLAYABLE_METHODS = %w[GET HEAD OPTIONS].freeze
     FORWARDED_HEADERS = %w[x-forwarded-for x-forwarded-proto x-forwarded-host x-forwarded-port].freeze
-    RESET_ERRORS = [ Errno::ECONNRESET, Errno::EPIPE, EOFError, IOError, ::Protocol::HTTP::RefusedError ].freeze
+    # How a backend closing the socket before answering surfaces in async-http
+    # (Node reports all of these as ECONNRESET "socket hang up").
+    RESET_ERRORS = [ Errno::ECONNRESET, Errno::EPIPE, EOFError, ::Protocol::HTTP::RefusedError ].freeze
+
+    # Raised from a request handler to drop the connection without a response
+    # (Node's socket.destroy()); `serve` closes the socket.
+    class DropConnection < StandardError; end
+
+    # Node's AggregateError from createLoopbackConnection: `errors` are the
+    # per-address failures (127.0.0.1 first), `details` their Node-style text.
+    class AggregateError < StandardError
+      attr_reader :errors, :details
+
+      def initialize(message, errors, details)
+        super(message)
+        @errors = errors
+        @details = details
+      end
+    end
+
+    # Tags an error raised on a pooled connection that had already served a
+    # response (Node's proxyReq.reusedSocket).
+    module ReusedSocket; end
+
+    # Async::HTTP::Client that records whether a failed request went out on a
+    # reused connection. `retries: 1` disables async-http's own retries
+    # (attempt 1 is the last); forward decides on the single replay.
+    class UpstreamClient < Async::HTTP::Client
+      def initialize(endpoint, **options)
+        super(endpoint, retries: 1, **options)
+      end
+
+      def make_response(request, connection, attempt)
+        reused = connection.count.positive?
+        super
+      rescue *RESET_ERRORS => e
+        e.extend(ReusedSocket) if reused
+        raise
+      end
+    end
 
     TLS_502_DETAIL = "Could not connect to the target app over HTTPS. Check that it supports TLS on the configured port."
 
     attr_reader :port
 
     # Mirrors ProxyServerOptions. `routes` is a callable returning the current
-    # route table (or a RouteStore, wrapped in a RouteCache). `tls` is nil or
-    # `{ cert:, key:, ca:, state_dir: }` (per-host certs minted under the TLDs),
-    # `{ cert:, key:, custom: true }` (one cert for every name), or with an
-    # explicit `sni_callback: ->(name) { ctx }`. `on_listening` fires once
-    # every listener is bound (zero-arity or receiving the proxy).
-    def initialize(port:, routes:, tlds: [ Constants::DEFAULT_TLD ], tld: nil, strict: true, tls: nil,
-                   loopback_only: false, lan_bind: false, on_hosts_sync_request: nil, hosts_sync_token: nil,
-                   logger: nil, on_error: nil, redirect_http: true, on_listening: nil)
+    # route table (getRoutes). `tls` is nil, `{ cert:, key:, ca:, state_dir: }`
+    # (per-host certs minted under the TLDs) or `{ cert:, key:, custom: true }`
+    # (one cert for every name). Listeners bind in the order
+    # cli.ts starts its servers: the extra `bind_targets`, then (with
+    # `redirect_http`) the :80 redirect on every target, then the primary.
+    # `on_auxiliary_listen(kind, host, port, error)` reports each non-primary
+    # bind (kind :proxy or :redirect, error nil on success); `on_listening`
+    # fires once the primary is bound.
+    def initialize(port:, routes:, bind_targets: Privilege.bind_targets(false), tlds: [ Constants::DEFAULT_TLD ],
+                   strict: true, tls: nil, loopback_only: false, on_hosts_sync_request: nil, hosts_sync_token: nil,
+                   on_error: ->(message) { warn(message) }, redirect_http: false, on_listening: nil,
+                   on_auxiliary_listen: nil)
       @port = port
-      @get_routes = routes.respond_to?(:call) ? routes : RouteCache.new(routes)
-      tlds = Array(tlds).compact
-      tlds = [ tld || Constants::DEFAULT_TLD ] if tlds.empty?
+      @bind_targets = bind_targets
+      @get_routes = routes
       @tld_suffixes = tlds.uniq.map { |value| ".#{value}" }
       @primary_tld_suffix = @tld_suffixes.first || ".localhost"
       @strict = strict
       @tls = tls
       @loopback_only = loopback_only
-      @lan_bind = lan_bind
       @on_hosts_sync_request = on_hosts_sync_request
       @hosts_sync_token = hosts_sync_token
-      @logger = logger
       @on_error = on_error
       @redirect_http = redirect_http
       @on_listening = on_listening
+      @on_auxiliary_listen = on_auxiliary_listen
       @clients = {}
       @dial_limits = {}
       @sockets = []
@@ -89,26 +131,13 @@ module Portless
     # ---------------------------------------------------------------------
     # Listening
 
-    # 127.0.0.1 + ::1 by default; 0.0.0.0 + :: (v6-only) for LAN mode and for
-    # the unprivileged wildcard bind (cli-utils.ts getProxyBindTargets).
-    def bind_targets
-      if @lan_bind
-        [ { host: "0.0.0.0" }, { host: "::", ipv6_only: true } ]
-      else
-        [ { host: "127.0.0.1" }, { host: "::1", ipv6_only: true } ]
-      end
-    end
-
     # Bind every listener, then serve until stopped (blocking). The primary
-    # bind raises (EADDRINUSE / EACCES are the caller's to explain); a failed
-    # secondary bind is logged unless IPv6 is simply unavailable; the :80
-    # redirect listener is best-effort and silent.
+    # bind raises (EADDRINUSE / EACCES are the caller's to explain); other
+    # binds are best-effort and reported through on_auxiliary_listen.
     def run
       listeners = bind_listeners
       @stop_reader, @stop_writer = IO.pipe
-      if @on_listening
-        @on_listening.arity.zero? ? @on_listening.call : @on_listening.call(self)
-      end
+      @on_listening&.call
       Sync do |task|
         listeners.each do |socket, kind|
           task.async { accept_loop(socket, kind) }
@@ -144,11 +173,7 @@ module Portless
     # `peer` is the client address (String) and `encrypted` whether the
     # connection is TLS. Returns a Protocol::HTTP::Response.
     def call(request, peer: nil, encrypted: !!@tls, replay: false)
-      if request.method == "CONNECT"
-        return handle_extended_connect(request, peer) if request.version == "HTTP/2" || request.protocol
-
-        return text(501, "CONNECT is only supported for WebSockets (RFC 8441)\n")
-      end
+      return handle_extended_connect(request, peer) if request.method == "CONNECT"
       return handle_upgrade(request, peer, encrypted) if request.protocol
 
       handle_request(request, peer, encrypted, replay)
@@ -182,7 +207,7 @@ module Portless
     end
 
     def self.tailscale_authority(route)
-      url = route.respond_to?(:tailscale_url) ? route.tailscale_url : nil
+      url = route.tailscale_url
       return nil if url.nil? || url.empty?
 
       uri = URI(url)
@@ -203,15 +228,15 @@ module Portless
 
     def self.loopback_authority?(authority)
       return true if [ "127.0.0.1", "[::1]" ].include?(authority)
-      return valid_port_suffix?(authority, "127.0.0.1") if authority.start_with?("127.0.0.1:")
-      return valid_port_suffix?(authority, "[::1]") if authority.start_with?("[::1]:")
+      return valid_port?(authority, "127.0.0.1") if authority.start_with?("127.0.0.1:")
+      return valid_port?(authority, "[::1]") if authority.start_with?("[::1]:")
 
       false
     end
 
-    def self.valid_port_suffix?(authority, hostname)
-      port = authority[(hostname.length + 1)..].to_s.strip
-      port.match?(/\A\d+\z/) && port.to_i.between?(1, 65_535)
+    # proxy.ts hasValidPort.
+    def self.valid_port?(authority, hostname)
+      authority == hostname || !Utils.parse_port(authority[(hostname.length + 1)..]).nil?
     end
 
     private
@@ -220,26 +245,25 @@ module Portless
 
     def bind_listeners
       listeners = []
-      primary, *rest = bind_targets
+      primary, *rest = @bind_targets
+      rest.each { |target| bind_auxiliary(listeners, target, @port, :proxy) }
+      if @tls && @redirect_http
+        @bind_targets.each { |target| bind_auxiliary(listeners, target, Constants::HTTP_PORT, :redirect) }
+      end
       listeners << [ bind_socket(primary, @port), :proxy ]
-      rest.each do |target|
-        listeners << [ bind_socket(target, @port), :proxy ]
-      rescue SystemCallError => e
-        unless unavailable_ipv6_bind?(e, target[:host])
-          log_warn("Could not listen on #{format_bind_endpoint(target[:host], @port)}: #{e.message}")
-        end
-      end
-      if @tls && @redirect_http && @port != Constants::HTTP_PORT
-        bind_targets.each do |target|
-          listeners << [ bind_socket(target, Constants::HTTP_PORT), :redirect ]
-        rescue SystemCallError
-          nil # port 80 unavailable: the main proxy still works, just no redirect
-        end
-      end
       listeners
     rescue StandardError
       close
       raise
+    end
+
+    def bind_auxiliary(listeners, target, port, kind)
+      begin
+        listeners << [ bind_socket(target, port), kind ]
+      rescue SystemCallError => e
+        error = e
+      end
+      @on_auxiliary_listen&.call(kind, target[:host], port, error)
     end
 
     def bind_socket(target, port)
@@ -257,12 +281,6 @@ module Portless
       @sockets << socket
       socket
     end
-
-    def unavailable_ipv6_bind?(error, host)
-      host.include?(":") && (error.is_a?(Errno::EAFNOSUPPORT) || error.is_a?(Errno::EADDRNOTAVAIL))
-    end
-
-    def format_bind_endpoint(host, port) = host.include?(":") ? "[#{host}]:#{port}" : "#{host}:#{port}"
 
     def accept_loop(server, kind)
       loop do
@@ -297,7 +315,14 @@ module Portless
       peer.close rescue nil
     end
 
-    def serve(io, address, protocol, scheme, &app)
+    # An HTTP/1.1 CONNECT is dropped on every listener: Node's servers have no
+    # h1 'connect' handler (proxy.ts destroys the socket on the TLS port).
+    def serve(io, address, protocol, scheme, &handler)
+      app = lambda do |request|
+        raise DropConnection if request.method == "CONNECT" && request.version != "HTTP/2"
+
+        handler.call(request)
+      end
       endpoint = Async::HTTP::Endpoint.parse("#{scheme}://localhost")
       Async::HTTP::Server.new(app, endpoint, protocol: protocol, scheme: scheme).accept(io, address)
     rescue StandardError
@@ -307,7 +332,7 @@ module Portless
     end
 
     def peek_byte(peer)
-      peer.wait_readable(30) or return nil
+      peer.wait_readable
       data = peer.recv(1, Socket::MSG_PEEK)
       data.nil? || data.empty? ? nil : data.getbyte(0)
     rescue StandardError
@@ -326,10 +351,9 @@ module Portless
 
     def ssl_context
       @ssl_context ||= begin
-        sni = @tls[:sni_callback]
         # Generated certs: `state_dir:` builds the TLD-restricted SNI minting.
         # Custom certs (`custom: true`) serve the given cert for every name.
-        if sni.nil? && @tls[:state_dir] && !@tls[:custom]
+        if @tls[:state_dir] && !@tls[:custom]
           sni = Certs.create_sni_callback(@tls[:state_dir], @tls[:cert], @tls[:key],
                                           @tld_suffixes.map { |suffix| suffix[1..] }, @tls[:ca])
         end
@@ -344,19 +368,20 @@ module Portless
       end
     end
 
+    # Like Node's `cert: tls.ca ? Buffer.concat([tls.cert, tls.ca]) : tls.cert`:
+    # every PEM block is served, the first as the leaf and the rest as its chain.
     def build_default_context
-      cert = to_cert(@tls[:cert])
+      cert, *chain = to_certs(@tls[:cert]) + (@tls[:ca] ? to_certs(@tls[:ca]) : [])
       key = @tls[:key].is_a?(OpenSSL::PKey::PKey) ? @tls[:key] : OpenSSL::PKey.read(@tls[:key])
-      ca = @tls[:ca] && to_cert(@tls[:ca])
       ctx = OpenSSL::SSL::SSLContext.new
-      ctx.add_certificate(cert, key, ca ? [ ca ] : [])
+      ctx.add_certificate(cert, key, chain)
       ctx.alpn_protocols = %w[h2 http/1.1]
       ctx.alpn_select_cb = ->(offered) { (%w[h2 http/1.1] & offered).first || "http/1.1" }
       ctx.session_id_context = "portless"
       ctx
     end
 
-    def to_cert(value) = value.is_a?(OpenSSL::X509::Certificate) ? value : OpenSSL::X509::Certificate.new(value)
+    def to_certs(value) = value.is_a?(OpenSSL::X509::Certificate) ? [ value ] : OpenSSL::X509::Certificate.load(value)
 
     def refuses_peer?(address) = @loopback_only && !self.class.loopback_peer?(address)
 
@@ -414,11 +439,13 @@ module Portless
       )
       response = client_for(route).call(upstream_request)
       rewrite_upstream_location(response.headers, route, request, encrypted)
-      HOP_BY_HOP_HEADERS.each { |key| response.headers.delete(key) }
+      HOP_BY_HOP_HEADERS.each { |key| response.headers.delete(key) } if encrypted
       response
     rescue *RESET_ERRORS => e
-      if !replay && REPLAYABLE_METHODS.include?(request.method) && request.body.nil?
-        # The backend closed a pooled socket as it was reused: replay once.
+      # The backend closed a pooled socket as it was reused: replay once
+      # instead of returning a 502. The first attempt consumed the body, so
+      # only bodiless requests replay.
+      if !replay && e.is_a?(ReusedSocket) && REPLAYABLE_METHODS.include?(request.method) && bodiless?(request)
         return forward(request, route, hops, peer, encrypted, true)
       end
 
@@ -427,12 +454,14 @@ module Portless
       bad_gateway(request, e)
     end
 
+    def bodiless?(request) = request.body.nil? || request.body.length&.zero?
+
     def bad_gateway(request, error)
       host = request_host(request)
       log_error("Proxy error for #{host}: #{format_proxy_error(error)}")
       detail = if tls_error?(error)
                  TLS_502_DETAIL
-      elsif error.is_a?(Errno::ECONNREFUSED)
+      elsif error_code(error) == Errno::ECONNREFUSED
                  "The target app is not responding. It may have crashed."
       else
                  "The target app may not be running."
@@ -464,7 +493,7 @@ module Portless
       lower = host.downcase
       name_host = lower.end_with?(".") ? lower.chomp(".") : lower
       portless_name = @tld_suffixes.any? { |suffix| name_host == suffix[1..] || name_host.end_with?(suffix) }
-      ip_address = ipv4?(host) || raw_host.start_with?("[")
+      ip_address = RouteStore.ipv4?(host) || raw_host.start_with?("[")
       unless portless_name || ip_address
         message = "DNS sent #{host} to this computer. This is not the real site."
         return send_proxy_error(request, 421, "misdirected_request", message, host) do
@@ -485,7 +514,7 @@ module Portless
       now = (Time.now.to_f * 1000).to_i
       filterable = routes.length > Pages::FILTER_THRESHOLD
       items = routes.map do |r|
-        age = Pages.format_uptime(r.respond_to?(:registered_at) ? r.registered_at : nil, now)
+        age = Pages.format_uptime(r.registered_at, now)
         label = r.pid.to_i.zero? && !r.pid.nil? ? "alias" : (age && "up #{age}")
         uptime = label ? %(<span class="uptime">#{label}</span>) : ""
         scheme = upstream_of(r)[:tls] ? "https" : "http"
@@ -549,7 +578,7 @@ module Portless
 
     # HTTP/1.1 Upgrade (on the TLS port, the plain HTTP listener, or a plain proxy).
     def handle_upgrade(request, peer, encrypted)
-      return text(403, "Forbidden") if refuses_peer?(peer)
+      raise DropConnection if refuses_peer?(peer)
 
       hops = hops_of(request)
       if hops >= MAX_PROXY_HOPS
@@ -560,16 +589,30 @@ module Portless
       end
 
       route = self.class.find_route(@get_routes.call, request_host(request), @strict)
-      return text(404, "No app registered for #{request_host(request)}\n") unless route
+      raise DropConnection unless route
 
+      proxy_upgrade(request, route, hops, peer, encrypted)
+    end
+
+    def proxy_upgrade(request, route, hops, peer, encrypted)
       headers = build_upstream_headers(request, route, hops, peer, encrypted, strip_hop_by_hop: false)
       %w[connection upgrade].each { |key| headers.delete(key) } # the protocol layer writes these
       upstream_request = ::Protocol::HTTP::Request.new(
         "http", headers.delete("host").to_s, request.method, request.path, nil, headers, request.body, request.protocol
       )
       response = client_for(route, websocket: true).call(upstream_request)
-      rewrite_upstream_location(response.headers, route, request, encrypted)
-      %w[connection upgrade keep-alive proxy-connection transfer-encoding].each { |key| response.headers.delete(key) }
+      if response.status == 101
+        # The backend's 101 headers relay verbatim, except the two the
+        # protocol layer writes itself when it switches protocols.
+        %w[connection upgrade].each { |key| response.headers.delete(key) }
+      else
+        # A rejection relays the backend's raw headers, Location rewritten.
+        # The connection closes after it either way (Node pipes then ends the
+        # socket; async-http never reuses an upgrade connection and writes its
+        # own `connection: close`), so the backend's copy would only repeat it.
+        rewrite_upstream_location(response.headers, route, request, encrypted)
+        response.headers.delete("connection")
+      end
       response
     rescue StandardError => e
       log_error("WebSocket proxy error for #{request_host(request)}: #{format_proxy_error(e)}")
@@ -693,7 +736,7 @@ module Portless
     end
 
     def upstream_of(route)
-      value = route.respond_to?(:upstream) ? route.upstream : nil
+      value = route.upstream
       return {} unless value.is_a?(Hash)
 
       value.transform_keys(&:to_sym)
@@ -705,14 +748,15 @@ module Portless
       limit = @dial_limits[key] ||= Async::Semaphore.new(MAX_PENDING_UPSTREAM_DIALS)
       endpoint = UpstreamEndpoint.new(route.port.to_i, upstream, limit)
       # WebSocket connections are hijacked by the upgrade, so never pool them.
-      return Async::HTTP::Client.new(endpoint, retries: 1, limit: 1) if websocket
+      return UpstreamClient.new(endpoint, limit: 1) if websocket
 
-      @clients[key] ||= Async::HTTP::Client.new(endpoint, retries: 1)
+      @clients[key] ||= UpstreamClient.new(endpoint)
     end
 
     # The backend dial: race 127.0.0.1 and ::1 (so ::1-only backends work),
-    # bounded by a connect timeout and a per-backend pending-dial limit, then
-    # TLS (SNI = upstream host, no verification) for `upstream.tls` routes.
+    # then TLS (SNI = upstream host, no verification) for `upstream.tls`
+    # routes, all within one connect timeout, behind a per-backend
+    # pending-dial limit (proxy.ts connectUpstream).
     class UpstreamEndpoint
       def initialize(port, upstream, limit)
         @port = port
@@ -728,9 +772,18 @@ module Portless
       def inspect = "#<#{self.class} #{self}>"
 
       def connect
-        socket = @limit.acquire { Proxy.create_loopback_connection(@port, timeout: UPSTREAM_CONNECT_TIMEOUT) }
+        @limit.acquire do
+          Async::Task.current.with_timeout(UPSTREAM_CONNECT_TIMEOUT) { dial }
+        rescue Async::TimeoutError
+          raise Errno::ETIMEDOUT, "Upstream connection timed out"
+        end
+      end
+
+      def dial
+        socket = Proxy.create_loopback_connection(@port)
         return socket unless @upstream[:tls]
 
+        connected = false
         begin
           ctx = OpenSSL::SSL::SSLContext.new
           ctx.verify_mode = OpenSSL::SSL::VERIFY_NONE
@@ -739,11 +792,11 @@ module Portless
           ssl.sync_close = true
           servername = servername_for(@upstream[:host])
           ssl.hostname = servername if servername
-          Async::Task.current.with_timeout(UPSTREAM_CONNECT_TIMEOUT) { ssl.connect }
+          ssl.connect
+          connected = true
           ssl
-        rescue StandardError
-          (ssl || socket).close rescue nil
-          raise
+        ensure
+          (ssl || socket).close rescue nil unless connected
         end
       end
 
@@ -758,11 +811,15 @@ module Portless
       end
     end
 
-    # Race both literal loopback addresses; return the first connected socket.
-    def self.create_loopback_connection(port, timeout: UPSTREAM_CONNECT_TIMEOUT)
+    LOOPBACK_HOSTS = [ [ "127.0.0.1", Socket::AF_INET ], [ "::1", Socket::AF_INET6 ] ].freeze
+
+    # Race both literal loopback addresses; return the first connected socket,
+    # or raise an AggregateError once both failed (utils.ts createLoopbackConnection).
+    # The caller bounds it with a timeout.
+    def self.create_loopback_connection(port)
       task = Async::Task.current
       results = Thread::Queue.new
-      attempts = [ [ "127.0.0.1", Socket::AF_INET ], [ "::1", Socket::AF_INET6 ] ].map do |host, family|
+      attempts = LOOPBACK_HOSTS.each_with_index.map do |(host, family), index|
         task.async do
           socket = Socket.new(family, Socket::SOCK_STREAM, 0)
           begin
@@ -770,21 +827,17 @@ module Portless
             results << [ :ok, socket ]
           rescue StandardError => e
             socket.close
-            results << [ :error, e ]
+            results << [ :error, [ index, e ] ]
           end
         end
       end
       errors = []
       winner = nil
       begin
-        task.with_timeout(timeout) do
-          until winner || errors.size == 2
-            kind, value = results.pop
-            kind == :ok ? winner = value : errors << value
-          end
+        until winner || errors.compact.size == 2
+          kind, value = results.pop
+          kind == :ok ? winner = value : errors[value[0]] = value[1]
         end
-      rescue Async::TimeoutError
-        raise Errno::ETIMEDOUT, "Upstream connection timed out"
       ensure
         attempts.each(&:stop)
         until results.empty?
@@ -794,10 +847,15 @@ module Portless
       end
       return winner if winner
 
-      first = errors.first
-      raise first.class, "Both loopback connections failed; #{errors.map(&:message).join('; ')}" if first.is_a?(SystemCallError)
+      details = errors.each_with_index.map { |e, i| node_connect_error(e, LOOPBACK_HOSTS[i][0], port) }
+      raise AggregateError.new("Both loopback connections failed", errors, details)
+    end
 
-      raise first
+    # String(err) of a Node connect error: "Error: connect ECONNREFUSED 127.0.0.1:4000".
+    def self.node_connect_error(error, host, port)
+      return "Error: #{error.message}" unless error.is_a?(SystemCallError)
+
+      "Error: connect #{error.class.name.split('::').last} #{host}:#{port}"
     end
 
     # --- helpers -----------------------------------------------------------
@@ -820,13 +878,14 @@ module Portless
       header_value(request, HOPS_HEADER).to_s[/\A\s*[+-]?\d+/].to_i
     end
 
-    def ipv4?(host)
-      host.match?(/\A\d{1,3}(\.\d{1,3}){3}\z/) && host.split(".").all? { |octet| octet.to_i <= 255 && octet == octet.to_i.to_s }
-    end
-
     def tls_error?(error) = error.is_a?(OpenSSL::SSL::SSLError)
 
-    def format_proxy_error(error) = error.message
+    def format_proxy_error(error)
+      error.is_a?(AggregateError) ? [ error.message, *error.details ].reject(&:empty?).join("; ") : error.message
+    end
+
+    # Node's err.code: an AggregateError carries its first error's code.
+    def error_code(error) = error.is_a?(AggregateError) ? error.errors.first.class : error.class
 
     def text(status, body, extra = {})
       ::Protocol::HTTP::Response[status, { "content-type" => "text/plain" }.merge(extra), [ body ]]
@@ -840,58 +899,6 @@ module Portless
       response
     end
 
-    def log_error(message)
-      if @on_error
-        @on_error.call(message)
-      elsif @logger
-        @logger.error(message)
-      else
-        warn(message)
-      end
-    end
-
-    def log_warn(message)
-      @logger ? @logger.warn(message) : warn(message)
-    end
-
-    # Serves a RouteStore's active routes to the proxy: reloads when routes.json
-    # changes or a cached route's owner has died (so a dead owner is never
-    # served), and keeps the last good table when the file is unreadable or
-    # corrupt, warning once.
-    class RouteCache
-      def initialize(store, on_warning: nil)
-        @store = store
-        @on_warning = on_warning || ->(message) { warn(message) }
-        @routes = []
-        @stamp = :unset
-        @warned = false
-      end
-
-      def call
-        stamp = file_stamp
-        reload if stamp != @stamp || !@routes.all? { |route| @store.route_owner_alive?(route) }
-        @routes
-      end
-
-      private
-
-      def reload
-        @stamp = file_stamp
-        @routes = @store.respond_to?(:load_trusted_routes) ? @store.load_trusted_routes : @store.load_routes
-        @warned = false
-      rescue StandardError => e
-        unless @warned
-          @warned = true
-          @on_warning.call("Could not reload routes: #{e.message}")
-        end
-      end
-
-      def file_stamp
-        stat = File.stat(@store.routes_path)
-        [ stat.mtime, stat.size, stat.ino ]
-      rescue StandardError
-        nil
-      end
-    end
+    def log_error(message) = @on_error.call(message)
   end
 end

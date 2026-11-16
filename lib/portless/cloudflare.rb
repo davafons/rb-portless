@@ -36,8 +36,6 @@ module Portless
       )
     end
 
-    def ensure_available(runner = nil) = Tunnel.ensure_available(provider, runner)
-
     # Writes an empty config so cloudflared ignores ~/.cloudflared/config.yml.
     def start(port, config_path:, host_header: "", **opts, &on_exit)
       File.write(config_path, "{}")

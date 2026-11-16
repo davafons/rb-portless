@@ -273,12 +273,16 @@ class RouteStoreTest < Minitest::Test
     assert_equal 1, disk.size
   end
 
-  def test_update_route_metadata_requires_the_owner_pid
-    @store.add_route(hostname: "a.localhost", port: 1, pid: Process.pid)
-    @store.update_route_metadata("a.localhost", 1, { tailscale_url: "https://t" })
-    assert_nil @store.load_routes.first.tailscale_url
-    @store.update_route_metadata("a.localhost", Process.pid, { tailscale_url: "https://t" })
-    assert_equal "https://t", @store.load_routes.first.tailscale_url
+  # JSON.stringify order: on-disk keys keep their place, new keys follow in
+  # assignment order, and retainStaleRecords' `retired` comes last.
+  def test_writes_keys_in_javascript_insertion_order
+    write_routes([ { "port" => 1, "future" => true, "hostname" => "a.localhost", "pid" => Process.pid },
+                   STALE ])
+    @store.update_route("a.localhost", { ngrok_pid: 7, child_pgid: 3 })
+    assert_equal %w[port future hostname pid childPgid ngrokPid], disk[0].keys
+    assert_equal STALE.keys + [ "retired" ], disk[1].keys
+    @store.add_route(hostname: "b.localhost", port: 2, pid: Process.pid, upstream: { tls: true })
+    assert_equal %w[hostname port pid registeredAt upstream], disk.find { |r| r["hostname"] == "b.localhost" }.keys
   end
 
   def test_backward_compat_without_registered_at_or_share_fields
@@ -297,11 +301,5 @@ class RouteStoreTest < Minitest::Test
     File.utime(old, old, lock)
     @store.add_route(hostname: "a.localhost", port: 1, pid: Process.pid)
     assert_equal 1, @store.load_routes.size
-  end
-
-  def test_prune_removes_stale_records
-    write_routes([ STALE, { hostname: "a.localhost", port: 1, pid: 0 } ])
-    assert_equal [ "stale.localhost" ], @store.prune.map(&:hostname)
-    assert_equal [ "a.localhost" ], disk.map { |r| r["hostname"] }
   end
 end

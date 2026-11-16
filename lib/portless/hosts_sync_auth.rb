@@ -17,12 +17,6 @@ module Portless
     HOSTS_SYNC_AUTH_CHALLENGE_HEADER = "x-portless-hosts-sync-challenge"
     HOSTS_SYNC_AUTH_PROOF_HEADER = "x-portless-hosts-sync-proof"
 
-    # Short aliases.
-    FILE = HOSTS_SYNC_AUTH_FILE
-    HEADER = HOSTS_SYNC_AUTH_HEADER
-    CHALLENGE_HEADER = HOSTS_SYNC_AUTH_CHALLENGE_HEADER
-    PROOF_HEADER = HOSTS_SYNC_AUTH_PROOF_HEADER
-
     PATTERN = /\A[a-f0-9]{64}\z/
 
     def valid_token?(value) = value.is_a?(String) && PATTERN.match?(value)

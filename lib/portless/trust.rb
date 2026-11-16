@@ -4,7 +4,6 @@ require "digest"
 require "fileutils"
 require "open3"
 require "securerandom"
-require "timeout"
 
 module Portless
   # Install / remove the local CA in the OS trust store, exactly like
@@ -31,9 +30,7 @@ module Portless
       "suse" => { cert_dir: "/etc/pki/trust/anchors", update_command: "update-ca-certificates" }
     }.freeze
 
-    def ca_common_name
-      defined?(Certs::CA_COMMON_NAME) ? Certs::CA_COMMON_NAME : Certs::CA_SUBJECT.delete_prefix("/CN=")
-    end
+    def ca_common_name = Certs::CA_COMMON_NAME
 
     def file_readable?(path) = File.readable?(path)
 
@@ -107,13 +104,26 @@ module Portless
       end
     end
 
+    # execFileSync with stdio "pipe": stdout on success; on timeout the child
+    # is killed (SIGTERM) and "spawnSync <cmd> ETIMEDOUT" raised; on a non-zero
+    # exit "Command failed: <cmd args>" plus stderr, like Node's message.
     def run!(cmd, timeout)
-      out, status = Timeout.timeout(timeout) { Open3.capture2e(*cmd) }
-      raise Error, out.strip.empty? ? "#{cmd.first} failed" : out.strip unless status.success?
-
-      out
-    rescue Timeout::Error
-      raise Error, "ETIMEDOUT"
+      Open3.popen3(*cmd) do |stdin, stdout, stderr, wait|
+        stdin.close
+        out = Thread.new { stdout.read }
+        err = Thread.new { stderr.read }
+        unless wait.join(timeout)
+          Process.kill("TERM", wait.pid) rescue nil
+          wait.join
+          raise Error, "spawnSync #{cmd.first} ETIMEDOUT"
+        end
+        unless wait.value.success?
+          message = "Command failed: #{cmd.join(' ')}"
+          stderr_text = err.value
+          raise Error, stderr_text.empty? ? message : "#{message}\n#{stderr_text}"
+        end
+        out.value
+      end
     end
 
     def run?(cmd, timeout)
@@ -222,16 +232,6 @@ module Portless
       end
 
       { trusted: false, error: message }
-    end
-
-    # CLI convenience: generate the CA if needed and trust it; raises Error
-    # with trustCA's message on failure.
-    def install!(state_dir = State.dir)
-      Daemon.ensure_certs(state_dir)
-      result = trust_ca(state_dir)
-      raise Error, result[:error] || "Could not add the CA to the system trust store." unless result[:trusted]
-
-      true
     end
 
     def trust_refresh_pending?(state_dir = State.dir) = pending_refresh?(File.join(state_dir, CA_TRUST_REFRESH_PENDING))

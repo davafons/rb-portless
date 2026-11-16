@@ -204,7 +204,7 @@ module Portless
         _, status = Process.wait2(pid)
         reader.join(1)
         code = status&.exitstatus
-        signal = status&.termsig && Signal.signame(status.termsig)
+        signal = status&.termsig && "SIG#{Signal.signame(status.termsig)}"
         if started
           handle.exited(code, signal)
         else

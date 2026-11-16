@@ -35,7 +35,7 @@ class E2ERunnerTest < Minitest::Test
       chdir: workdir, in: File::NULL, out: File::NULL, err: File::NULL
     )
 
-    route = wait_for { Portless::RouteStore.new.routes.find { |r| r.hostname == HOST } }
+    route = wait_for { Portless::RouteStore.new.load_routes.find { |r| r.hostname == HOST } }
     refute_nil route, "run never registered #{HOST}"
 
     res = wait_for do
@@ -52,7 +52,7 @@ class E2ERunnerTest < Minitest::Test
 
     Process.kill("TERM", pid)
     Process.wait(pid)
-    gone = wait_for { Portless::RouteStore.new.routes.none? { |r| r.hostname == HOST } || nil }
+    gone = wait_for { Portless::RouteStore.new.load_routes.none? { |r| r.hostname == HOST } || nil }
     assert gone, "route was not deregistered after TERM"
   ensure
     if pid
@@ -92,7 +92,7 @@ class E2ERunnerTest < Minitest::Test
       chdir: workdir, in: File::NULL, out: File::NULL, err: File::NULL
     )
 
-    route = wait_for { Portless::RouteStore.new.routes.find { |r| r.hostname == "e2etree.localhost" } }
+    route = wait_for { Portless::RouteStore.new.load_routes.find { |r| r.hostname == "e2etree.localhost" } }
     refute_nil route, "run never registered e2etree.localhost"
     up = wait_for do
       begin
@@ -170,7 +170,7 @@ class E2ERunnerTest < Minitest::Test
     )
 
     assert_includes out, "ran-direct PORT=nil"
-    assert_nil Portless::RouteStore.new.routes.find { |r| r.hostname == "e2eskip.localhost" }
+    assert_nil Portless::RouteStore.new.load_routes.find { |r| r.hostname == "e2eskip.localhost" }
   end
 
   private
