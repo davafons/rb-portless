@@ -6,6 +6,7 @@
 "packages/portless/src/cli-utils.test.ts > ownedProcessIds > still finds orphaned children once the root exited": "ownedProcessIds only serves the Windows orphan watcher; Windows is not ported"
 "packages/portless/src/cli-utils.test.ts > ownedProcessIds > works when evaluated standalone, as the watcher script embeds it": "ownedProcessIds only serves the Windows orphan watcher; Windows is not ported"
 "packages/portless/src/cli-utils.test.ts > resolveTurboRootForwarding > recognizes a turbo.cmd shim": "Windows-only (it.runIf win32)"
+"packages/portless/src/cli.test.ts > CLI > prune > stops only verified Windows tunnel executables": "Fakes process.platform = win32 with a Node preload; Windows process lookup is not ported"
 "packages/portless/src/service.test.ts > buildServiceSpec > builds a Windows startup task for the HTTPS proxy": "Windows Task Scheduler service is not ported"
 "packages/portless/src/service.test.ts > buildServiceSpec > escapes percent signs in Windows batch env values": "Windows Task Scheduler service is not ported"
 "packages/portless/src/service.test.ts > buildServiceSpec > preserves PATH in the Windows startup script": "Windows Task Scheduler service is not ported"

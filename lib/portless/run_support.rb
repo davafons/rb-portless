@@ -34,13 +34,17 @@ module Portless
       [ *collect_bin_paths(cwd), base, File.dirname(RbConfig.ruby) ].reject(&:empty?).join(File::PATH_SEPARATOR)
     end
 
+    # Variables Bundler sets up; everything else in ENV (including what the CLI
+    # itself sets, e.g. PORTLESS_LAN) passes through untouched.
+    BUNDLER_ENV_KEYS = /\A(?:BUNDLE_\w+|BUNDLER_\w+|RUBYOPT|RUBYLIB|RUBYGEMS_GEMDEPS|GEM_HOME|GEM_PATH|MANPATH|PATH)\z/
+
     # ENV deltas that undo Bundler for the child (nil unsets). Plumbing: our
     # own bundle must not leak into the dev command.
     def unbundled_overrides
       return {} unless defined?(Bundler) && Bundler.respond_to?(:unbundled_env)
 
       target = Bundler.unbundled_env
-      (ENV.keys | target.keys).each_with_object({}) do |key, deltas|
+      (ENV.keys | target.keys).grep(BUNDLER_ENV_KEYS).each_with_object({}) do |key, deltas|
         deltas[key] = target[key] if ENV[key] != target[key]
       end
     rescue StandardError

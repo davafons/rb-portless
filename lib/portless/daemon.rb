@@ -745,6 +745,7 @@ module Portless
 
     # ── the foreground server (cli.ts startProxyServer) ──────────────────
     def start_proxy_server(store, proxy_port, tld, tlds, tls_options, lan_ip, strict, custom_cert, unprivileged)
+      $stdout.sync = true # Node writes console output to files synchronously; proxy.log is read live.
       store.ensure_dir
       dir = store.dir
       is_tls = !tls_options.nil?
