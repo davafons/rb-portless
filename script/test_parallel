@@ -1,0 +1,67 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Runs each test file in its own process, several at once, longest first.
+# Every process gets its own temp HOME/state dir from test_helper, so files
+# don't share state. Prints a failing file's full output, then a summary.
+#
+#   script/test_parallel                 # all of test/**/*_test.rb
+#   script/test_parallel test/upstream   # files under a directory
+#   JOBS=4 script/test_parallel          # worker count (default: CPUs / 2)
+
+require "etc"
+require "open3"
+
+ROOT = File.expand_path("..", __dir__)
+Dir.chdir(ROOT)
+
+# Files known to dominate the run start first so they don't finish last alone.
+SLOW = %w[test/upstream/cli_test.rb test/upstream/e2e/zombie_test.rb test/upstream/proxy_test.rb
+          test/upstream/e2e/self_daemon_test.rb].freeze
+
+roots = ARGV.empty? ? [ "test" ] : ARGV
+files = roots.flat_map { |r| r.end_with?(".rb") ? [ r ] : Dir[File.join(r, "**/*_test.rb")] }.uniq.sort
+files = files.partition { |f| SLOW.include?(f) }.then { |slow, rest| slow.sort_by { |f| SLOW.index(f) } + rest }
+jobs = Integer(ENV.fetch("JOBS", [ Etc.nprocessors / 2, 1 ].max))
+
+queue = Queue.new
+files.each { |f| queue << f }
+results = Queue.new
+started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+
+workers = Array.new(jobs) do
+  Thread.new do
+    while (file = queue.pop(true) rescue nil)
+      t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      out, status = Open3.capture2e(RbConfig.ruby, "-Itest", "-Ilib", file)
+      results << [ file, status.success?, out, Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0 ]
+    end
+  end
+end
+
+totals = Hash.new(0)
+failed = []
+files.size.times do
+  file, ok, out, secs = results.pop
+  summary = out[/(\d+) runs, (\d+) assertions, (\d+) failures, (\d+) errors, (\d+) skips/]
+  if summary
+    %i[runs assertions failures errors skips].zip(Regexp.last_match.captures.map(&:to_i)).each { |k, v| totals[k] += v }
+  end
+  if ok && summary
+    print "."
+  else
+    failed << file
+    puts "\n#{'=' * 70}\nFAILED #{file} (#{secs.round(1)}s)\n#{out}"
+  end
+end
+workers.each(&:join)
+
+elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+puts "\n\n#{files.size} files in #{elapsed.round}s (#{jobs} jobs): " \
+     "#{totals[:runs]} runs, #{totals[:assertions]} assertions, #{totals[:failures]} failures, " \
+     "#{totals[:errors]} errors, #{totals[:skips]} skips"
+unless failed.empty?
+  puts "Failed files:"
+  failed.each { |f| puts "  #{f}" }
+end
+exit(failed.empty? ? 0 : 1)

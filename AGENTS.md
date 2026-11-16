@@ -127,7 +127,8 @@ bundle, keychain safety, our e2e harness) stay in `test/*_test.rb`.
 ## Conventions
 
 - Stdlib-first; runtime deps are `async` + `async-http` (h1/h2/TLS/WebSocket).
-- Minitest in `test/`. `test_helper.rb` points `HOME` and `PORTLESS_STATE_DIR` at a temp
+- Minitest in `test/`. `bundle exec rake` runs every file in parallel (`script/test_parallel`,
+  ~5 min, bounded by `test/upstream/cli_test.rb`) plus the mirror check; `rake test` is serial. `test_helper.rb` points `HOME` and `PORTLESS_STATE_DIR` at a temp
   dir and puts shims for `security`/`sudo`/`certutil` first on `PATH`, so no test can touch
   `~/.rb-portless`, the keychain, or `/etc/hosts`. Never undo that in a test. Port upstream's unit tests
   alongside the code. The e2e layer (`test/e2e_helper.rb`) runs the real daemon on a

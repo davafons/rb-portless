@@ -16,6 +16,12 @@ rescue LoadError
   # rubocop is a dev-only convenience.
 end
 
+namespace :test do
+  desc "Run each test file in its own process, in parallel (JOBS=n)"
+  task :parallel do
+    sh "script/test_parallel"
+  end
+end
 
 namespace :upstream do
   desc "Every upstream test has a same-named Ruby test in test/upstream (or a reason in skips.yml)"
@@ -29,4 +35,4 @@ namespace :upstream do
   end
 end
 
-task default: %i[test upstream:check]
+task default: %i[test:parallel upstream:check]
