@@ -1565,7 +1565,9 @@ describe "createProxyServer with TLS (HTTP/2)" do
         assert_equal 502, response[:status]
         assert_includes response[:body], "supports TLS on the configured port"
       end
-      assert(errors.any? { |error| error =~ /wrong version number/i }, errors.inspect)
+      # The text is the system OpenSSL's (Node bundles its own): 3.5.5 reports a
+      # plaintext reply as "record layer failure", 3.5.7 as "wrong version number".
+      assert(errors.any? { |error| error =~ /wrong version number|record layer failure/i }, errors.inspect)
       reset = true
       reset_response = https_request(server, host: "ws.localhost", accept: "application/json")
       assert_equal 502, reset_response.status
