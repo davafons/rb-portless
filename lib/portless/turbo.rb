@@ -13,10 +13,10 @@ module Portless
     LOADER_FILENAME = "turbo-env-loader.cjs"
     MANIFEST_FILENAME = "dev-manifest.json"
 
-    def loader_path(base_dir = State.dir) = File.join(base_dir, LOADER_FILENAME)
-    def manifest_path(base_dir = State.dir) = File.join(base_dir, MANIFEST_FILENAME)
+    def loader_path(base_dir = State.user_state_dir) = File.join(base_dir, LOADER_FILENAME)
+    def manifest_path(base_dir = State.user_state_dir) = File.join(base_dir, MANIFEST_FILENAME)
 
-    def loader_source(base_dir = State.dir)
+    def loader_source(base_dir = State.user_state_dir)
       <<~JS
         "use strict";
         var fs = require("fs");
@@ -37,7 +37,7 @@ module Portless
       JS
     end
 
-    def ensure_env_loader(base_dir = State.dir)
+    def ensure_env_loader(base_dir = State.user_state_dir)
       FileUtils.mkdir_p(base_dir, mode: 0o755)
       target = loader_path(base_dir)
       source = loader_source(base_dir)
@@ -47,19 +47,19 @@ module Portless
       File.chmod(0o644, target)
     end
 
-    def write_manifest(entries, base_dir = State.dir)
+    def write_manifest(entries, base_dir = State.user_state_dir)
       FileUtils.mkdir_p(base_dir, mode: 0o755)
       File.write(manifest_path(base_dir), "#{JSON.pretty_generate(entries)}\n")
       File.chmod(0o644, manifest_path(base_dir))
     end
 
-    def remove_manifest(base_dir = State.dir)
+    def remove_manifest(base_dir = State.user_state_dir)
       File.delete(manifest_path(base_dir))
     rescue StandardError
       nil
     end
 
-    def build_node_options(base_dir = State.dir)
+    def build_node_options(base_dir = State.user_state_dir)
       existing = ENV["NODE_OPTIONS"].to_s
       lp = loader_path(base_dir)
       flag = lp.include?(" ") ? "--require \"#{lp}\"" : "--require #{lp}"

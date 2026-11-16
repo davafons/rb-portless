@@ -38,6 +38,17 @@ end
 class CliTest < Minitest::Test
   include CliTestSupport
 
+  # isPortlessSkipped compares exactly: PORTLESS=FALSE still proxies.
+  def test_portless_bypass_values_are_exact_like_upstream
+    { "0" => true, "false" => true, "skip" => true, "FALSE" => false, "Skip" => false, "1" => false, nil => false }.each do |value, skipped|
+      previous = ENV["PORTLESS"]
+      value.nil? ? ENV.delete("PORTLESS") : ENV["PORTLESS"] = value
+      assert_equal skipped, Portless.skip_proxy?, "PORTLESS=#{value.inspect}"
+    ensure
+      previous.nil? ? ENV.delete("PORTLESS") : ENV["PORTLESS"] = previous
+    end
+  end
+
   def test_version
     code, out, = cli("--version")
     assert_equal [ 0, "#{Portless::VERSION}\n" ], [ code, out ]

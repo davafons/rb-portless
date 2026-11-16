@@ -705,7 +705,7 @@ module Portless
         File.write(files[:model], JSON.pretty_generate(plan.model), perm: 0o600)
         State.fix_ownership(files[:model], files[:ports])
 
-        @err.puts(Colors.bold("\nrb-portless compose #{plan.project}\n", io: @err))
+        @err.write(Colors.bold("\nrb-portless compose #{plan.project}\n", io: @err), "\n") # console.error adds its own newline
         plan.kept.each do |k|
           where = k.published ? "host port #{k.published}" : "an ephemeral port"
           verb = k.dropped ? "drops" : "keeps"

@@ -205,7 +205,8 @@ module Portless
         "PORTLESS_LAN" => config[:lan_mode] ? "1" : "0",
         "PORTLESS_WILDCARD" => config[:use_wildcard] ? "1" : "0",
         "PORTLESS_UNPRIVILEGED" => config[:unprivileged] ? "1" : "0",
-        **config[:extra_env]
+        **config[:extra_env],
+        **Privilege.ruby_env
       }
       env["PORTLESS_LAN_IP"] = config[:lan_ip] if config[:lan_mode] && config[:lan_ip_explicit] && config[:lan_ip]
       if config[:lan_mode]
@@ -418,7 +419,7 @@ module Portless
 
     def elevated_env_args(home:, state_dir:, env: ENV, extra_env: {})
       omit = [ "PORTLESS_STATE_DIR", *extra_env.keys ]
-      [ "env", *Privilege.portless_env_args(env, omit: omit), *extra_env.map { |k, v| "#{k}=#{v}" },
+      [ "env", *Privilege.portless_env_args(env, omit: omit), *Privilege.ruby_env_args(env), *extra_env.map { |k, v| "#{k}=#{v}" },
         "HOME=#{home}", "PORTLESS_STATE_DIR=#{state_dir}" ]
     end
 

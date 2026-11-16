@@ -104,6 +104,12 @@ module Portless
       end
     end
 
+    # Node's http server and client cap a header block at 16 KiB (maxHeaderSize);
+    # protocol-http1 caps each line at 8 KiB by default, which dropped long
+    # cookies and URLs that upstream accepts. Allow a single line up to Node's cap.
+    MAX_HEADER_SIZE = 16 * 1024
+    HTTP1_PROTOCOL = Async::HTTP::Protocol::HTTP11.new(maximum_line_length: MAX_HEADER_SIZE)
+
     TLS_502_DETAIL = "Could not connect to the target app over HTTPS. Check that it supports TLS on the configured port."
 
     # `port` is proxyPort (the port URLs and redirects name); `listen_port`
@@ -336,20 +342,21 @@ module Portless
       return peer.close if refuses_peer?(address)
 
       if kind == :redirect
-        serve(peer, address, Async::HTTP::Protocol::HTTP11, "http") { |request| redirect_response(request, @port) }
+        serve(peer, address, HTTP1_PROTOCOL, "http") { |request| redirect_response(request, @port) }
       elsif @tls
         first = peek_byte(peer)
         return peer.close if first.nil?
 
         if first == 0x16
           ssl = tls_accept(peer) or return
-          serve(ssl, address, Async::HTTP::Protocol::HTTPS.new, "https") { |request| call(request, peer: address, encrypted: true) }
+          protocol = ssl.alpn_protocol == "h2" ? Async::HTTP::Protocol::HTTP2 : HTTP1_PROTOCOL
+          serve(ssl, address, protocol, "https") { |request| call(request, peer: address, encrypted: true) }
         else
-          serve(peer, address, Async::HTTP::Protocol::HTTP11, "http") { |request| plain_on_tls_port(request, address) }
+          serve(peer, address, HTTP1_PROTOCOL, "http") { |request| plain_on_tls_port(request, address) }
         end
       else
         Fiber[:portless_client_io] = peer
-        serve(peer, address, Async::HTTP::Protocol::HTTP11, "http") { |request| call(request, peer: address, encrypted: false) }
+        serve(peer, address, HTTP1_PROTOCOL, "http") { |request| call(request, peer: address, encrypted: false) }
       end
     rescue StandardError
       peer.close rescue nil
@@ -745,6 +752,9 @@ module Portless
         # own `connection: close`), so the backend's copy would only repeat it.
         rewrite_upstream_location(response.headers, route, request, encrypted)
         response.headers.delete("connection")
+        # No tunnel: stop reading the client side so the socket closes after
+        # the relayed response, as Node ends it.
+        request.body&.close rescue nil
       end
       response
     rescue DropConnection
@@ -913,7 +923,7 @@ module Portless
         @tracker = tracker
       end
 
-      def protocol = Async::HTTP::Protocol::HTTP11
+      def protocol = HTTP1_PROTOCOL
       def scheme = "http"
       def authority = "localhost:#{@port}"
       def secure? = false

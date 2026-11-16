@@ -356,6 +356,41 @@ class ProxyTest < Minitest::Test
     assert_equal [ [ 1, 1 ], [ 1, 2 ], [ 2, 1 ] ], drain(log)
   end
 
+  # Node accepts any single header or URL while the header block stays under
+  # 16 KiB; protocol-http1's default 8 KiB line cap used to drop these.
+  def test_long_cookie_and_url_reach_the_backend_like_node
+    backend = echo_backend
+    port = start_proxy([ route("app.localhost", backend) ])
+    cookie = "a=#{'x' * 9000}"
+    res = http(port, "app.localhost", headers: { "cookie" => cookie })
+    assert_equal "200", res.code
+    assert_includes res.body, cookie
+
+    path = "/?q=#{'y' * 9000}"
+    res = http(port, "app.localhost", path)
+    assert_equal "200", res.code
+    assert_includes res.body, "GET #{path} HTTP/1.1"
+  end
+
+  def test_long_backend_response_header_is_relayed
+    long = "z" * 9000
+    backend = echo_backend { |c, _| c.write("HTTP/1.1 200 OK\r\nx-long: #{long}\r\ncontent-length: 2\r\n\r\nok") }
+    port = start_proxy([ route("app.localhost", backend) ])
+    res = http(port, "app.localhost")
+    assert_equal "200", res.code
+    assert_equal long, res["x-long"]
+  end
+
+  def test_rejected_websocket_upgrade_closes_the_client_socket
+    backend = echo_backend { |c, _| c.write("HTTP/1.1 401 Unauthorized\r\ncontent-length: 4\r\n\r\nnope") }
+    port = start_proxy([ route("app.localhost", backend) ])
+    started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    out = raw(port, "GET /cable HTTP/1.1\r\nHost: app.localhost\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n" \
+                    "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n")
+    assert_match %r{\AHTTP/1.1 401}, out
+    assert_operator Process.clock_gettime(Process::CLOCK_MONOTONIC) - started, :<, 1.5, "socket left open after the rejection"
+  end
+
   def test_upstream_json_errors_pass_through_unchanged
     backend = echo_backend { |c, _| c.write(%(HTTP/1.1 503 Service Unavailable\r\ncontent-type: application/json\r\ncontent-length: 11\r\n\r\n{"down":1}\n)) }
     port = start_proxy([ route("app.localhost", backend) ])

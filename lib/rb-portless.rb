@@ -58,10 +58,8 @@ module Portless
 
   # `PORTLESS=0|false|skip` runs the command straight through, no proxy/route —
   # the bypass portless documents for CI or one-off plain runs.
-  def self.skip_proxy? = %w[0 false skip].include?(ENV["PORTLESS"].to_s.downcase)
+  def self.skip_proxy? = %w[0 false skip].include?(ENV["PORTLESS"]) # exact, case-sensitive (isPortlessSkipped)
 
-  # Truthy env toggle ("1"/"true"), for the PORTLESS_* flag equivalents.
-  def self.env_true?(name) = %w[1 true].include?(ENV[name].to_s.downcase)
 
   # Is an executable on PATH? (For optional external tools: dns-sd, ngrok, …)
   def self.which(bin)

@@ -24,6 +24,10 @@ Deliberate divergences (naming only, so both tools coexist):
   the same conditions as `NODE_EXTRA_CA_CERTS` — the Ruby analogue, so Ruby clients
   trust sibling `.localhost` HTTPS apps.
 - The child runs in `Bundler.unbundled_env` (plumbing, not a feature).
+- `GEM_HOME`/`GEM_PATH` cross `sudo env` and go into the boot service env when set
+  (`Privilege.ruby_env`), so a gem under a custom GEM_HOME loads as root.
+- `doctor` reports the Ruby runtime (`rubyVersion` in `--json`, "Ruby" in text) where
+  upstream reports Node.js.
 
 Known limits of the async-http stack (not choices; don't "fix" them by hand-rolling HTTP):
 empty bodies are framed as `content-length: 0` (responses, and bodiless requests sent to
@@ -31,7 +35,10 @@ the backend), and empty responses carry no `connection: keep-alive`; a rejected
 WebSocket upgrade gets async-http's own `connection: close` instead of the backend's;
 "socket hang up" is ECONNRESET/EPIPE/EOF/`Protocol::HTTP::RefusedError`; WebSocket over
 HTTP/2 extended CONNECT reaches the backend with async-http's lowercase `connection: upgrade`;
-there is one loopback dialer per concurrency model (`Proxy.create_loopback_connection` on
+no `100 Continue` interim response; malformed requests differ in detail (duplicate `Host`
+→ 400, absolute-URI request lines route by the URI authority, no `Date` header or 5 s
+idle keep-alive timeout, lowercase h1 response header names, duplicate headers not
+joined); there is one loopback dialer per concurrency model (`Proxy.create_loopback_connection` on
 fibers for the proxy, `Utils.create_loopback_connection` on threads for probes) where
 upstream has one `createLoopbackConnection`.
 
@@ -47,7 +54,8 @@ the code, and port upstream skill edits when you port the feature they describe.
 
 The version mirrors the upstream release we match, plus a fourth segment for our own
 fixes: `0.17.0.0` = parity with upstream 0.17.0, `0.17.0.1` = first local fix on top.
-Only claim an upstream version once its features are in.
+Only claim an upstream version once its features are in. `script/upstream/PIN` is the exact
+upstream commit we match; when it is past the release tag, say so in the CHANGELOG.
 
 ## Core mechanisms (upstream invariants)
 

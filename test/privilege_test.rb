@@ -40,6 +40,11 @@ class PrivilegeTest < Minitest::Test
     assert_equal [ "PORTLESS_TLD=test" ], P.portless_env_args(env, omit: [ "PORTLESS_STATE_DIR" ])
   end
 
+  def test_ruby_env_args_carry_a_custom_gem_home_across_sudo
+    assert_equal [ "GEM_HOME=/g", "GEM_PATH=/g:/h" ], P.ruby_env_args({ "GEM_HOME" => "/g", "GEM_PATH" => "/g:/h", "HOME" => "/x" })
+    assert_empty P.ruby_env_args({ "GEM_HOME" => "", "PATH" => "/bin" })
+  end
+
   def test_cli_argv_reexecs_this_ruby_with_lib
     argv = P.cli_argv
     assert_equal RbConfig.ruby, argv[0]

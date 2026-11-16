@@ -87,10 +87,14 @@ class Tool
     @argv = argv
     @state_dir = File.realpath(Dir.mktmpdir("diff-#{name}-", tmp))
     @cwd = File.realpath(Dir.mktmpdir("diff-#{name}-cwd-", tmp))
+    # Never the real home: `clean`, `trust` and friends act on ~ (a run without
+    # this once wiped the real ~/.rb-portless).
+    @home = File.realpath(Dir.mktmpdir("diff-#{name}-home-", tmp))
   end
 
   def env(extra = {})
     {
+      "HOME" => @home, "NODE_EXTRA_CA_CERTS" => nil, "SSL_CERT_FILE" => nil,
       "PORTLESS_STATE_DIR" => @state_dir, "PORTLESS_PORT" => PROXY_PORT.to_s, "PORTLESS_HTTPS" => "0",
       "PORTLESS_SYNC_HOSTS" => "0", "NO_COLOR" => "1", "FORCE_COLOR" => nil, "CI" => nil,
       "PORTLESS_LAN" => nil, "PORTLESS_TLD" => nil, "PORTLESS_APP_PORT" => nil
@@ -119,7 +123,7 @@ class Tool
   end
 
   def cleanup
-    FileUtils.rm_rf([ @state_dir, @cwd ])
+    FileUtils.rm_rf([ @state_dir, @cwd, @home ])
   end
 
   def normalize(text)
@@ -127,7 +131,7 @@ class Tool
     [ @state_dir, @state_dir.sub(%r{\A/private}, ""), @cwd, @cwd.sub(%r{\A/private}, "") ].each do |p|
       s.gsub!(p, p.start_with?(@cwd.sub(%r{\A/private}, "")) ? "<CWD>" : "<STATE>")
     end
-    s.gsub!(Dir.home, "<HOME>")
+    [ @home, @home.sub(%r{\A/private}, ""), Dir.home ].each { |p| s.gsub!(p, "<HOME>") }
     s.gsub!(/(?<![\w-])portless(?![\w])/, "rb-portless")
     s.gsub!(/rb-rb-portless/, "rb-portless")
     s.gsub!(PROXY_PORT.to_s, "<PROXY_PORT>")

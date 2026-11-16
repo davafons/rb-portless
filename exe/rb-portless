@@ -1,6 +1,22 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-require_relative "../lib/rb-portless"
+# The async stack uses IO::Buffer, which Ruby flags as experimental on every
+# use (e.g. "IO::Buffer is experimental" on proxy shutdown). Not actionable for
+# users, and upstream prints nothing there. Only affects this process.
+Warning[:experimental] = false
+
+begin
+  require_relative "../lib/rb-portless"
+rescue LoadError
+  # Run from inside a bundled process (a rake task, `bundle exec`, bin/rails)
+  # whose Gemfile lacks rb-portless: Bundler hides our dependencies. Re-run
+  # once outside the bundle.
+  raise unless defined?(Bundler) && ENV["RB_PORTLESS_UNBUNDLED"].nil?
+
+  Bundler.with_unbundled_env do
+    exec({ "RB_PORTLESS_UNBUNDLED" => "1" }, RbConfig.ruby, File.expand_path(__FILE__), *ARGV)
+  end
+end
 
 Portless::CLI.start(ARGV)

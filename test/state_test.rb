@@ -11,6 +11,14 @@ class StateTest < Minitest::Test
     S.resolve_user_home(env: env, windows: false, macos: macos, homedir: "/var/root", passwd_home: ->(_) { passwd })
   end
 
+  # turbo.ts uses USER_STATE_DIR (~/.portless), not PORTLESS_STATE_DIR.
+  def test_turbo_files_live_in_the_user_state_dir_whatever_the_override
+    assert_equal File.join(Dir.home, ".rb-portless"), Portless::State.user_state_dir
+    refute_equal Portless::State.dir, Portless::State.user_state_dir # test_helper overrides it
+    assert_equal File.join(Dir.home, ".rb-portless", "turbo-env-loader.cjs"), Portless::Turbo.loader_path
+    assert_equal File.join(Dir.home, ".rb-portless", "dev-manifest.json"), Portless::Turbo.manifest_path
+  end
+
   def test_resolve_user_home
     assert_equal "/var/root", home({})
     assert_equal "/var/root", home({ "SUDO_USER" => "root" })

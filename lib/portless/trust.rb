@@ -112,17 +112,20 @@ module Portless
         stdin.close
         out = Thread.new { stdout.read }
         err = Thread.new { stderr.read }
+        [ out, err ].each { |t| t.report_on_exception = false }
         unless wait.join(timeout)
           Process.kill("TERM", wait.pid) rescue nil
           wait.join
+          [ out, err ].each { |t| t.join(1) } # a grandchild may still hold the pipe
           raise Error, "spawnSync #{cmd.first} ETIMEDOUT"
         end
+        stdout_text = out.value
+        stderr_text = err.value
         unless wait.value.success?
           message = "Command failed: #{cmd.join(' ')}"
-          stderr_text = err.value
           raise Error, stderr_text.empty? ? message : "#{message}\n#{stderr_text}"
         end
-        out.value
+        stdout_text
       end
     end
 

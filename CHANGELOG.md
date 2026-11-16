@@ -8,7 +8,9 @@ All notable changes to this project are documented here. The format follows
 
 rb-portless now tracks Vercel portless exactly. Versions mirror the upstream
 release we match, plus a fourth segment for our own fixes: this release matches
-portless 0.17.0. Commands, flags, environment variables, `portless.json` /
+portless 0.17.0 plus the unreleased upstream commits up to `73f789e` (`--json` on
+`list`/`get`/`doctor`, exit code 2 for usage errors, strict flag parsing, `clean`
+confirmation, shorter help). Commands, flags, environment variables, `portless.json` /
 `package.json` config, routing, JSON output, exit codes and messages follow
 upstream. The only differences are names (`rb-portless`, `~/.rb-portless`, hosts
 markers, service ids) so both tools can be installed side by side, plus

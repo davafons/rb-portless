@@ -125,6 +125,13 @@ module Portless
          .map { |k, v| "#{k}=#{v}" }
     end
 
+    # GEM_HOME/GEM_PATH for `sudo env …` and the boot service: sudo and launchd
+    # drop them, and a gem installed under a custom GEM_HOME (--user-install,
+    # chruby gem_home) can't load its dependencies as root without them. Ruby
+    # plumbing with no upstream counterpart; empty when they aren't set.
+    def ruby_env(env = ENV) = env.slice("GEM_HOME", "GEM_PATH").reject { |_, v| v.to_s.empty? }
+    def ruby_env_args(env = ENV) = ruby_env(env).map { |k, v| "#{k}=#{v}" }
+
     # spawnSync's result: the exit status, or the spawn error message
     # ("spawnSync sudo ETIMEDOUT" when the timeout killed it).
     SpawnResult = Struct.new(:status, :error) do
@@ -143,7 +150,7 @@ module Portless
 
     # `sudo env PORTLESS_*… ruby <cli> *args` with inherited stdio.
     def sudo(args, timeout: SUDO_SPAWN_TIMEOUT)
-      run_sudo([ "env", *portless_env_args, *cli_argv, *args ], timeout: timeout)
+      run_sudo([ "env", *portless_env_args, *ruby_env_args, *cli_argv, *args ], timeout: timeout)
     end
 
     def reexec_with_sudo(args) = sudo(args).success?

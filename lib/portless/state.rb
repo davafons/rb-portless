@@ -21,8 +21,12 @@ module Portless
       env = ENV["PORTLESS_STATE_DIR"]
       return env if env && !env.empty?
 
-      File.join(resolve_user_home, File.basename(Constants::DEFAULT_STATE_DIR))
+      user_state_dir
     end
+
+    # ~/.rb-portless whatever PORTLESS_STATE_DIR says (USER_STATE_DIR): where
+    # upstream keeps per-user files such as the Turbo env loader.
+    def user_state_dir = File.join(resolve_user_home, File.basename(Constants::DEFAULT_STATE_DIR))
 
     # The home that owns rb-portless state. Under sudo keep the invoking user's
     # home so the elevated proxy and unprivileged apps share one route store.
