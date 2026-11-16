@@ -62,6 +62,10 @@ markers, service ids) so both tools can be installed side by side, plus
   multi-app runs, hosts sync owned by the daemon, styled error pages, plain HTTP
   on the TLS port redirected to HTTPS, backend connection pooling with parallel
   IPv4/IPv6 dialing, and routes handed to self-daemonizing servers.
+- Agent skills, ported from upstream's `skills/` for Ruby and Rails:
+  `rb-portless` (setup, Rails `config.hosts` / `PORT` / `bin/dev`, troubleshooting)
+  and `rb-portless-oauth` (OmniAuth/Devise redirect URIs). Install with
+  `npx skills add davafons/rb-portless`.
 
 ### Fixed
 
@@ -72,14 +76,15 @@ markers, service ids) so both tools can be installed side by side, plus
 - `get` dropped the proxy port and the TLD of dotted names.
 - `--port` was added to `vite build` / `astro build` and duplicated after a
   user's `--port`.
+- Multi-app (workspace) runs didn't set `SSL_CERT_FILE` for their children.
 - mDNS advertised port 80 instead of the proxy port; tailscale teardown could
   remove a funnel it didn't create; the state dir under sudo now resolves through
   `SUDO_USER`.
 
 ### Not ported
 
-- Windows CA trust and the Windows boot service, the legacy `/tmp/portless`
-  state migration, and upstream's agent skills.
+- Windows CA trust and the Windows boot service, and the legacy `/tmp/portless`
+  state migration.
 
 ## [0.5.2] — 2026-09-08
 

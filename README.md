@@ -109,6 +109,13 @@ which override `portless.json`. See [Configuration](https://portless.sh/configur
 
 ## For AI agents
 
+Install the rb-portless skills (Ruby/Rails versions of upstream's portless and OAuth
+skills) into an agent harness:
+
+```bash
+npx skills add davafons/rb-portless
+```
+
 `rb-portless mcp` starts an MCP server over stdio. The default `core` profile lists
 routes, looks up URLs, and manages static aliases. `--tools all` adds proxy control and
 diagnostics:

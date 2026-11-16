@@ -26,7 +26,12 @@ Deliberate divergences (naming only, so both tools coexist):
 - The child runs in `Bundler.unbundled_env` (plumbing, not a feature).
 
 Not ported (yet): Windows CA trust + Task Scheduler service, the legacy `/tmp/portless`
-state migration, agent skills (`skills/`).
+state migration.
+
+Agent skills (`skills/`) are upstream's `skills/portless` and `skills/oauth`, rewritten
+for Ruby/Rails as `rb-portless` and `rb-portless-oauth` (different names so they install
+next to upstream's). Same section order as upstream; keep behaviour claims in sync with
+the code, and port upstream skill edits when you port the feature they describe.
 
 ## Versioning
 
