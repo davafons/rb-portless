@@ -1,0 +1,38 @@
+# Upstream file -> the rb-portless files that port it. Used by
+# script/upstream/sync to say which Ruby files an upstream change touches, and
+# by check_tests to name each mirrored test file. Keep in step with the module
+# map in AGENTS.md. A null entry means "deliberately not ported" (say why).
+sources:
+  packages/portless/src/args.ts: [lib/portless/args.rb]
+  packages/portless/src/auto.ts: [lib/portless/auto.rb]
+  packages/portless/src/certs.ts: [lib/portless/certs.rb, lib/portless/trust.rb, lib/portless/ca_bundle.rb]
+  packages/portless/src/clean-utils.ts: [lib/portless/clean_utils.rb]
+  packages/portless/src/cli-utils.ts: [lib/portless/utils.rb, lib/portless/daemon.rb, lib/portless/health.rb, lib/portless/frameworks.rb, lib/portless/free_port.rb, lib/portless/runner.rb]
+  packages/portless/src/cli.ts: [lib/portless/cli.rb, lib/portless/daemon.rb, lib/portless/runner.rb, lib/portless/run_support.rb, lib/portless/process_group.rb, lib/portless/multi.rb, lib/portless/doctor.rb, lib/portless/help.rb]
+  packages/portless/src/cloudflare.ts: [lib/portless/cloudflare.rb]
+  packages/portless/src/colors.ts: [lib/portless/colors.rb]
+  packages/portless/src/commands.ts: [lib/portless/commands.rb]
+  packages/portless/src/compose.ts: [lib/portless/compose.rb]
+  packages/portless/src/config.ts: [lib/portless/config.rb]
+  packages/portless/src/fonts.ts: [lib/portless/fonts.rb]
+  packages/portless/src/hosts-sync-auth.ts: [lib/portless/hosts_sync_auth.rb]
+  packages/portless/src/hosts.ts: [lib/portless/hosts.rb]
+  packages/portless/src/index.ts: [lib/rb-portless.rb]
+  packages/portless/src/lan-ip.ts: [lib/portless/lan_ip.rb]
+  packages/portless/src/mcp.ts: [lib/portless/mcp.rb]
+  packages/portless/src/mdns.ts: [lib/portless/mdns.rb]
+  packages/portless/src/pages.ts: [lib/portless/pages.rb]
+  packages/portless/src/proxy.ts: [lib/portless/proxy.rb]
+  packages/portless/src/routes.ts: [lib/portless/route_store.rb]
+  packages/portless/src/service.ts: [lib/portless/service.rb]
+  packages/portless/src/tailscale.ts: [lib/portless/share/tailscale.rb]
+  packages/portless/src/tunnel.ts: [lib/portless/tunnel.rb]
+  packages/portless/src/turbo.ts: [lib/portless/turbo.rb]
+  packages/portless/src/types.ts: [lib/portless/route_store.rb]
+  packages/portless/src/utils.ts: [lib/portless/utils.rb, lib/portless/state.rb, lib/portless/privilege.rb, lib/portless/port_owner.rb]
+  packages/portless/src/windows-ca.ts: null # Windows CA trust is not ported (macOS/Linux only)
+  packages/portless/src/workspace.ts: [lib/portless/workspace.rb]
+  skills/portless/SKILL.md: [skills/rb-portless/SKILL.md]
+  skills/oauth/SKILL.md: [skills/rb-portless-oauth/SKILL.md]
+  README.md: [README.md]
+  packages/portless/package.json: [lib/portless/version.rb]

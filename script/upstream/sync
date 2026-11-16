@@ -1,0 +1,152 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# What changed upstream since the commit we match (script/upstream/PIN), and
+# what that means here: commits, version bump, changed source files mapped to
+# the Ruby files that port them (script/upstream/map.yml), and upstream tests
+# added or removed (which the mirror in test/upstream must follow).
+#
+#   script/upstream/sync                    # PIN..origin/main of references/portless
+#   script/upstream/sync --fetch            # git fetch the upstream clone first
+#   script/upstream/sync --to v0.18.0       # PIN..<ref>
+#   script/upstream/sync --from v0.16.0 --to v0.17.0   # any range (read-only)
+#   script/upstream/sync --bump <ref>       # after porting: check the mirror against
+#                                           # <ref>, then move PIN to it
+#
+# The report is printed and written to tmp/upstream-sync/<ref>.md (gitignored).
+# Workflow for an upstream release:
+#   1. script/upstream/sync --fetch --to <ref>   read the report
+#   2. port each source change into the mapped Ruby files (read the TS diff:
+#      git -C references/portless diff <pin> <ref> -- <file>)
+#   3. port added/changed tests into test/upstream (script/upstream/check_tests --ref <ref>)
+#   4. git -C references/portless checkout <ref>, rebuild (see AGENTS.md), run
+#      test/differential/run.rb
+#   5. script/upstream/sync --bump <ref>; bump lib/portless/version.rb; CHANGELOG
+
+require "fileutils"
+require "json"
+require "open3"
+require "optparse"
+require "set"
+require "yaml"
+
+ROOT = File.expand_path("../..", __dir__)
+UPSTREAM = File.join(ROOT, "references/portless")
+PIN_FILE = File.join(__dir__, "PIN")
+
+opts = { fetch: false, from: nil, to: nil, bump: nil }
+OptionParser.new do |o|
+  o.on("--fetch") { opts[:fetch] = true }
+  o.on("--from REF") { |v| opts[:from] = v }
+  o.on("--to REF") { |v| opts[:to] = v }
+  o.on("--bump REF") { |v| opts[:bump] = v }
+end.parse!
+
+abort "Upstream clone missing: git clone https://github.com/vercel-labs/portless references/portless" unless Dir.exist?(UPSTREAM)
+
+def git(*args)
+  out, status = Open3.capture2("git", "-C", UPSTREAM, *args)
+  abort "git #{args.join(' ')} failed" unless status.success?
+  out
+end
+
+def resolve(ref) = git("rev-parse", "--verify", "#{ref}^{commit}").strip
+
+pin = File.read(PIN_FILE).strip
+
+if opts[:bump]
+  target = resolve(opts[:bump])
+  ok = system(File.join(__dir__, "check_tests"), "--ref", target)
+  abort "\nThe test mirror does not match #{opts[:bump]} yet; port the missing tests first." unless ok
+  File.write(PIN_FILE, "#{target}\n")
+  puts "\nPIN moved #{pin[0, 12]} -> #{target[0, 12]} (#{opts[:bump]})."
+  exit
+end
+
+git("fetch", "--tags", "origin") if opts[:fetch]
+pin = resolve(opts[:from]) if opts[:from]
+to_name = opts[:to] || "origin/main"
+to = resolve(to_name)
+
+map = YAML.safe_load_file(File.join(__dir__, "map.yml"))["sources"]
+
+def version_at(ref)
+  JSON.parse(git("show", "#{ref}:packages/portless/package.json"))["version"]
+rescue StandardError
+  "?"
+end
+
+def tests_at(ref)
+  json, status = Open3.capture2("node", File.join(__dir__, "extract_tests.mjs"), ref)
+  abort "extract_tests.mjs failed at #{ref}" unless status.success?
+  JSON.parse(json).to_set { |t| [ t["file"], [ *t["path"], t["name"] ].join(" > ") ] }
+end
+
+# Build/lint/CI config and the docs site have no Ruby counterpart.
+IGNORED = %r{(^|/)(node_modules|dist)/|pnpm-lock\.yaml$|pnpm-workspace\.yaml$|\.changeset/|^apps/|^examples/|^\.github/|
+             ^\.oxlintrc|eslint\.config|(^|/)tsconfig[^/]*\.json$|tsup\.config\.ts$|vitest\.config\.ts$|^turbo\.json$|
+             ^package\.json$|^patches/|^scripts/}x
+
+lines = []
+lines << "# Upstream sync: #{pin[0, 12]} (v#{version_at(pin)}) -> #{to_name} #{to[0, 12]} (v#{version_at(to)})"
+lines << ""
+if pin == to
+  lines << "Nothing new upstream."
+else
+  commits = git("log", "--reverse", "--format=- %h %s", "#{pin}..#{to}").lines.map(&:chomp)
+  lines << "## Commits (#{commits.size})" << "" << commits << ""
+
+  changed = git("diff", "--name-status", "-M", pin, to).lines.map { |l| l.chomp.split("\t") }
+  src = []
+  tests = []
+  unmapped = []
+  changed.each do |status, *paths|
+    file = paths.last
+    next if file.match?(IGNORED)
+
+    if file.match?(/\.test\.ts$/)
+      tests << "#{status} #{paths.join(' -> ')}"
+    elsif file == "CHANGELOG.md"
+      next # read it for context; the commit list above covers it
+    elsif map.key?(file)
+      targets = map[file]
+      src << "- #{status} `#{file}` -> #{targets ? targets.map { |t| "`#{t}`" }.join(', ') : '(not ported)'}"
+    else
+      unmapped << "- #{status} `#{paths.join(' -> ')}`"
+    end
+  end
+  lines << "## Source changes -> Ruby files to update" << "" << (src.empty? ? [ "(none)" ] : src) << ""
+  lines << "Diff one file: `git -C references/portless diff #{pin[0, 12]} #{to[0, 12]} -- <file>`" << ""
+  unless unmapped.empty?
+    lines << "## Not in map.yml (decide: port, map, or mark null)" << "" << unmapped << ""
+  end
+
+  before = tests_at(pin)
+  after = tests_at(to)
+  added = (after - before).sort
+  removed = (before - after).sort
+  lines << "## Tests (#{tests.size} files changed; +#{added.size} / -#{removed.size} tests)" << ""
+  lines << "Changed test bodies don't show here; read the diff of each changed test file:" << ""
+  lines.concat(tests.map { |t| "- #{t}" }) << ""
+  unless added.empty?
+    lines << "### Added (port into test/upstream)" << ""
+    lines.concat(added.map { |f, k| "- `#{File.basename(f)}`: #{k}" }) << ""
+  end
+  unless removed.empty?
+    lines << "### Removed (delete from test/upstream or skips.yml)" << ""
+    lines.concat(removed.map { |f, k| "- `#{File.basename(f)}`: #{k}" }) << ""
+  end
+  lines << "## Next" << ""
+  lines << "1. Port the source changes above, function by function."
+  lines << "2. `script/upstream/check_tests --ref #{to[0, 12]} --list` until clean; `bundle exec rake test`."
+  lines << "3. `git -C references/portless checkout #{to[0, 12]}`, rebuild, run `ruby test/differential/run.rb`."
+  lines << "4. `script/upstream/sync --bump #{to[0, 12]}`, set VERSION to #{version_at(to)}.0, CHANGELOG entry."
+end
+
+report = lines.flatten.join("\n")
+puts report
+dir = File.join(ROOT, "tmp/upstream-sync")
+FileUtils.mkdir_p(dir)
+out = File.join(dir, "#{to_name.tr('/', '-')}.md")
+File.write(out, "#{report}\n")
+warn "\nWritten to #{out.delete_prefix("#{ROOT}/")}"

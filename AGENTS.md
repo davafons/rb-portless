@@ -26,9 +26,14 @@ Deliberate divergences (naming only, so both tools coexist):
 - The child runs in `Bundler.unbundled_env` (plumbing, not a feature).
 
 Known limits of the async-http stack (not choices; don't "fix" them by hand-rolling HTTP):
-empty responses carry `content-length: 0` and no `connection: keep-alive`; a rejected
+empty bodies are framed as `content-length: 0` (responses, and bodiless requests sent to
+the backend), and empty responses carry no `connection: keep-alive`; a rejected
 WebSocket upgrade gets async-http's own `connection: close` instead of the backend's;
-"socket hang up" is ECONNRESET/EPIPE/EOF/`Protocol::HTTP::RefusedError`.
+"socket hang up" is ECONNRESET/EPIPE/EOF/`Protocol::HTTP::RefusedError`; WebSocket over
+HTTP/2 extended CONNECT reaches the backend with async-http's lowercase `connection: upgrade`;
+there is one loopback dialer per concurrency model (`Proxy.create_loopback_connection` on
+fibers for the proxy, `Utils.create_loopback_connection` on threads for probes) where
+upstream has one `createLoopbackConnection`.
 
 Not ported (yet): Windows CA trust + Task Scheduler service, the legacy `/tmp/portless`
 state migration.
@@ -65,6 +70,26 @@ Only claim an upstream version once its features are in.
   forces `.local`, publishes every route over mDNS, re-checks the LAN IP every 5 s.
 - **State-dir safety.** Commands refuse a state dir another user can change; root-side
   writes never follow symlinks.
+
+## Upstream test suite (test/upstream)
+
+`test/upstream/` mirrors upstream's tests one to one: `packages/portless/src/foo-bar.test.ts`
+→ `test/upstream/foo_bar_test.rb`, `tests/e2e/src/foo.test.ts` → `test/upstream/e2e/foo_test.rb`.
+Each upstream `describe`/`it` is a Minitest::Spec `describe`/`it` with the **identical string**,
+and the body ports the upstream body: same setup, same inputs, same assertions, adapted to
+the Ruby API (snake_case names, Ruby exceptions, our naming divergences). `it.each`/`it.for`
+keep the template string once and loop the rows. Never weaken an assertion to make it pass:
+a failing ported test is a parity bug in `lib/`, fix the code. Upstream tests that cannot
+apply (Windows-only) go in `test/upstream/skips.yml` with a reason. Ruby-only tests (CA
+bundle, keychain safety, our e2e harness) stay in `test/*_test.rb`.
+
+- `script/upstream/check_tests [--list] [--file x] [--ref sha]` — every upstream test has its
+  Ruby twin in the right file, nothing extra (`rake upstream:check`).
+- `script/upstream/sync [--fetch] [--to ref]` — commits, source files → Ruby files to update
+  (`script/upstream/map.yml`), tests added/removed since `script/upstream/PIN`
+  (`rake upstream:sync`). Its header lists the release workflow; `--bump ref` moves PIN once
+  the mirror matches.
+- `test/differential/run.rb` — same commands against both CLIs, output diffed.
 
 ## Module map (`lib/portless/`)
 

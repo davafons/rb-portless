@@ -16,4 +16,17 @@ rescue LoadError
   # rubocop is a dev-only convenience.
 end
 
-task default: %i[test]
+
+namespace :upstream do
+  desc "Every upstream test has a same-named Ruby test in test/upstream (or a reason in skips.yml)"
+  task :check do
+    sh "script/upstream/check_tests"
+  end
+
+  desc "Report upstream changes since script/upstream/PIN (FETCH=1 to fetch first)"
+  task :sync do
+    sh "script/upstream/sync", *(ENV["FETCH"] ? [ "--fetch" ] : [])
+  end
+end
+
+task default: %i[test upstream:check]

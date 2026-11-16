@@ -1,0 +1,141 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Checks that every upstream test has a Ruby counterpart with the same name,
+# in the mirrored file, and that test/upstream holds nothing else.
+#
+#   script/upstream/check_tests                 # against script/upstream/PIN
+#   script/upstream/check_tests --ref <sha>     # against another upstream ref
+#   script/upstream/check_tests --file proxy    # only files matching "proxy"
+#   script/upstream/check_tests --list          # print each missing/extra test
+#
+# Mirroring rules (see AGENTS.md "Upstream test suite"):
+# - packages/portless/src/foo-bar.test.ts -> test/upstream/foo_bar_test.rb
+#   tests/e2e/src/foo.test.ts            -> test/upstream/e2e/foo_test.rb
+# - Each upstream `describe`/`it` becomes a Minitest::Spec `describe`/`it`
+#   with the identical string. it.each/it.for tables keep the template string
+#   once and loop the rows in Ruby. Names built at runtime (${...}) match any
+#   Ruby name that fits the template.
+# - Upstream tests that cannot apply to rb-portless go in
+#   test/upstream/skips.yml with a reason, instead of a Ruby test.
+# Exit status 1 when anything is missing, extra, or in the wrong file.
+
+require "json"
+require "open3"
+require "optparse"
+require "yaml"
+
+ROOT = File.expand_path("../..", __dir__)
+opts = { ref: File.read(File.join(__dir__, "PIN")).strip, file: nil, list: false }
+OptionParser.new do |o|
+  o.on("--ref REF") { |v| opts[:ref] = v }
+  o.on("--file PATTERN") { |v| opts[:file] = v }
+  o.on("--list") { opts[:list] = true }
+end.parse!
+
+def mirror_path(upstream_file)
+  base = File.basename(upstream_file, ".test.ts").tr("-.", "__")
+  dir = upstream_file.start_with?("tests/e2e/") ? "test/upstream/e2e" : "test/upstream"
+  "#{dir}/#{base}_test.rb"
+end
+
+def key(path, name) = [ *path, name ].join(" > ")
+
+# Template "a ${x} b" -> /\Aa .+ b\z/
+def template_regex(text)
+  Regexp.new("\\A#{text.split(/\$\{[^}]*\}/, -1).map { |part| Regexp.escape(part) }.join('.+')}\\z")
+end
+
+json, status = Open3.capture2("node", File.join(__dir__, "extract_tests.mjs"), opts[:ref])
+abort "extract_tests.mjs failed" unless status.success?
+upstream = JSON.parse(json)
+upstream.select! { |t| t["file"].include?(opts[:file]) || mirror_path(t["file"]).include?(opts[:file]) } if opts[:file]
+
+skips_file = File.join(ROOT, "test/upstream/skips.yml")
+skips = File.exist?(skips_file) ? (YAML.safe_load_file(skips_file) || {}) : {}
+
+# Load the Ruby mirror without running it.
+require "minitest"
+module Minitest
+  def self.autorun; end
+end
+require "minitest/spec"
+Minitest.seed = 1
+Dir.chdir(ROOT)
+Dir[File.join(ROOT, "test/upstream/**/*_test.rb")].each { |f| require f }
+
+ruby = Hash.new { |h, k| h[k] = [] } # mirror file -> [key, ...]
+Minitest::Runnable.runnables.each do |klass|
+  next unless klass < Minitest::Spec
+
+  path = []
+  c = klass
+  while c < Minitest::Spec
+    path.unshift(c.desc.to_s)
+    c = c.superclass
+  end
+  klass.runnable_methods.each do |m|
+    file = klass.instance_method(m).source_location.first.delete_prefix("#{ROOT}/")
+    next unless file.start_with?("test/upstream/")
+
+    ruby[file] << key(path, m.sub(/\Atest_\d+_/, ""))
+  end
+end
+
+problems = 0
+rows = []
+upstream.group_by { |t| t["file"] }.sort.each do |file, tests|
+  mirror = mirror_path(file)
+  have = ruby.delete(mirror) || []
+  remaining = have.tally
+  missing = []
+  skipped = 0
+  tests.each do |t|
+    k = key(t["path"], t["name"])
+    skip_key = "#{file} > #{k}"
+    if skips.key?(skip_key)
+      skipped += 1
+      next
+    end
+
+    if t["dynamic"]
+      re = template_regex(k)
+      matches = remaining.keys.select { |name| re.match?(name) }
+      matches.empty? ? missing << k : matches.each { |name| remaining.delete(name) }
+    elsif remaining[k].to_i.positive?
+      remaining[k] -= 1
+      remaining.delete(k) if remaining[k].zero?
+    else
+      missing << k
+    end
+  end
+  extra = remaining.flat_map { |name, n| [ name ] * n }
+  problems += missing.size + extra.size
+  rows << [ mirror, tests.size, tests.size - skipped - missing.size, skipped, missing, extra ]
+end
+ruby.each do |file, names|
+  next if opts[:file]
+
+  problems += names.size
+  rows << [ file, 0, 0, 0, [], names ]
+end
+
+width = rows.map { |r| r[0].size }.max || 10
+puts format("%-#{width}s %8s %8s %8s %8s %6s", "mirror file", "upstream", "ported", "skipped", "missing", "extra")
+rows.each do |mirror, total, ported, skipped, missing, extra|
+  puts format("%-#{width}s %8d %8d %8d %8d %6d", mirror, total, ported, skipped, missing.size, extra.size)
+  next unless opts[:list]
+
+  missing.each { |k| puts "    missing: #{k}" }
+  extra.each { |k| puts "    extra:   #{k}" }
+end
+totals = rows.transpose
+puts format("%-#{width}s %8d %8d %8d %8d %6d", "TOTAL", totals[1].sum, totals[2].sum, totals[3].sum,
+            totals[4].sum(&:size), totals[5].sum(&:size))
+stale = skips.keys.reject { |k| upstream.any? { |t| "#{t['file']} > #{key(t['path'], t['name'])}" == k } }
+unless opts[:file] || stale.empty?
+  problems += stale.size
+  puts "\nskips.yml entries that no longer match an upstream test:"
+  stale.each { |k| puts "  #{k}" }
+end
+exit(problems.zero? ? 0 : 1)
