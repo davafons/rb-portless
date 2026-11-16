@@ -33,7 +33,7 @@ workers = Array.new(jobs) do
   Thread.new do
     while (file = queue.pop(true) rescue nil)
       t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-      out, status = Open3.capture2e(RbConfig.ruby, "-Itest", "-Ilib", file)
+      out, status = Open3.capture2e(RbConfig.ruby, "-rbundler/setup", "-Itest", "-Ilib", file)
       results << [ file, status.success?, out, Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0 ]
     end
   end

@@ -745,7 +745,11 @@ module Portless
 
     # ── the foreground server (cli.ts startProxyServer) ──────────────────
     def start_proxy_server(store, proxy_port, tld, tlds, tls_options, lan_ip, strict, custom_cert, unprivileged)
-      $stdout.sync = true # Node writes console output to files synchronously; proxy.log is read live.
+      # Node writes console output to files synchronously; proxy.log is read live.
+      # Flush first: Ruby < 4.0 keeps buffering after `sync = true` while
+      # earlier output (the heading) is still pending.
+      $stdout.flush
+      $stdout.sync = true
       store.ensure_dir
       dir = store.dir
       is_tls = !tls_options.nil?

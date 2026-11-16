@@ -572,10 +572,11 @@ class ProxyTest < Minitest::Test
     require "async/http/client"
     port = start_proxy([ route("app.localhost", ws_backend) ], tls: true)
     Sync do
-      endpoint = Async::HTTP::Endpoint.parse("https://app.localhost:#{port}",
+      # Dial 127.0.0.1 directly (SNI and :authority still say app.localhost),
+      # so the test doesn't depend on the system resolving *.localhost.
+      endpoint = Async::HTTP::Endpoint.parse("https://app.localhost:#{port}", IO::Endpoint.tcp("127.0.0.1", port),
                                              ssl_context: OpenSSL::SSL::SSLContext.new.tap { |c| c.verify_mode = OpenSSL::SSL::VERIFY_NONE; c.alpn_protocols = %w[h2] },
                                              protocol: Async::HTTP::Protocol::HTTP2)
-      endpoint = endpoint.with(address: Addrinfo.tcp("127.0.0.1", port)) if endpoint.respond_to?(:with)
       client = Async::HTTP::Client.new(endpoint)
       body = Protocol::HTTP::Body::Writable.new
       request = Protocol::HTTP::Request.new("https", "app.localhost:#{port}", "CONNECT", "/cable", nil,

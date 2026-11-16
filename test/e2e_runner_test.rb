@@ -152,7 +152,7 @@ class E2ERunnerTest < Minitest::Test
     out = IO.popen(env, [ RbConfig.ruby, "-I", lib, exe, "run", "--name", "e2emissing", "--",
                           "definitely-not-a-real-command" ], err: [ :child, :out ], &:read)
     refute $?.success?
-    assert_match(/command not found/, out)
+    assert_match(/not found/, out) # sh says "command not found"; dash (Debian/Ubuntu) says "not found"
     refute_match(/Traceback|backtrace/, out)
   ensure
     E2E.deregister("e2emissing.localhost")
