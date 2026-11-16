@@ -3,6 +3,7 @@
 require "openssl"
 require "fileutils"
 require "digest"
+require "securerandom"
 
 module Portless
   # Local CA, the default server cert and per-host leaf certs. Upstream
@@ -29,6 +30,7 @@ module Portless
     SERVER_KEY_FILE = "server-key.pem"
     SERVER_CERT_FILE = "server.pem"
     CA_TRUST_MARKER = "ca.trusted"
+    CA_SERIAL_FILE = "ca.srl"
     HOST_CERTS_DIR = "host-certs"
     SERVER_SANS = %w[DNS:localhost DNS:*.localhost DNS:*.local].freeze
 
@@ -154,7 +156,7 @@ module Portless
         ca_cert, ca_key = load_ca(state_dir)
         key_path = File.join(state_dir, SERVER_KEY_FILE)
         cert_path = File.join(state_dir, SERVER_CERT_FILE)
-        cert, key = sign_leaf(ca_cert, ca_key, "localhost", SERVER_SANS)
+        cert, key = sign_leaf(ca_cert, ca_key, "localhost", SERVER_SANS, state_dir)
         write_file(key_path, key.to_pem, 0o600)
         write_file(cert_path, cert.to_pem, 0o644)
         State.fix_ownership(key_path)
@@ -178,7 +180,7 @@ module Portless
         parts = hostname.split(".")
         sans << "DNS:*.#{parts[1..].join('.')}" if parts.length >= 3
         cn = hostname.length > MAX_CN_LENGTH ? hostname[0, MAX_CN_LENGTH] : hostname
-        cert, key = sign_leaf(ca_cert, ca_key, cn, sans)
+        cert, key = sign_leaf(ca_cert, ca_key, cn, sans, state_dir)
 
         write_file(key_path, key.to_pem, 0o600)
         write_file(cert_path, cert.to_pem, 0o644)
@@ -194,9 +196,10 @@ module Portless
 
       private
 
-      def sign_leaf(ca_cert, ca_key, common_name, sans)
+      def sign_leaf(ca_cert, ca_key, common_name, sans, state_dir = nil)
         key = OpenSSL::PKey::EC.generate(CURVE)
         cert = new_cert(OpenSSL::X509::Name.new([ [ "CN", common_name ] ]), ca_cert.subject, key, SERVER_VALIDITY_DAYS)
+        cert.serial = next_ca_serial(state_dir) if state_dir
         ef = extension_factory(cert, ca_cert)
         cert.add_extension(ef.create_extension("authorityKeyIdentifier", "keyid,issuer"))
         cert.add_extension(ef.create_extension("basicConstraints", "CA:FALSE"))
@@ -205,6 +208,18 @@ module Portless
         cert.add_extension(ef.create_extension("subjectAltName", sans.join(",")))
         cert.sign(ca_key, OpenSSL::Digest.new("SHA256"))
         [ cert, key ]
+      end
+
+      # Leaf serials come from <state_dir>/ca.srl, seeded randomly when missing
+      # and incremented per signature, like `openssl x509 -req -CAserial`.
+      def next_ca_serial(state_dir)
+        srl_path = File.join(state_dir, CA_SERIAL_FILE)
+        unless file_exists?(srl_path)
+          File.write(srl_path, "#{SecureRandom.uuid.delete('-')[0, 16].upcase}\n")
+        end
+        serial = File.read(srl_path).strip.to_i(16) + 1
+        File.write(srl_path, "#{serial.to_s(16).upcase}\n")
+        serial
       end
 
       def new_cert(subject, issuer, key, days)

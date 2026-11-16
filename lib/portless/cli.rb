@@ -667,7 +667,7 @@ module Portless
     # handleService (incl. parseServiceInstallConfig) lives in service.ts
     # upstream, so Service owns it.
     def handle_service(args)
-      Service.handle(args)
+      Service.handle_service(args)
       0
     end
 
@@ -877,7 +877,7 @@ module Portless
       end
 
       problems = collected[:failures].length
-      service = Service.try_uninstall
+      service = Service.try_uninstall_service
       if service[:removed]
         puts Colors.green("Removed startup service.")
       elsif service[:needs_elevation] && !Constants::WINDOWS && !Privilege.root?
@@ -987,7 +987,7 @@ module Portless
 
     def run_service_uninstall_with_sudo(reason)
       puts Colors.yellow("#{reason} Requesting sudo...")
-      Privilege.run_sudo(Service.uninstall_sudo_args).success?
+      Privilege.run_sudo(Service.build_service_uninstall_sudo_args).success?
     end
 
     # ── doctor ────────────────────────────────────────────────────────────

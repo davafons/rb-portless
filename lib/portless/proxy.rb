@@ -11,6 +11,7 @@ require "protocol/http/headers"
 require "protocol/http/request"
 require "protocol/http/response"
 require "protocol/http/body/buffered"
+require "protocol/http/body/completable"
 require "openssl"
 require "securerandom"
 require "socket"
@@ -59,6 +60,12 @@ module Portless
     # (Node's socket.destroy()); `serve` closes the socket.
     class DropConnection < StandardError; end
 
+    # A pending upstream dial cancelled because the client went away or the
+    # proxy is closing (Node's ABORT_ERR): answered 502, never logged.
+    class AbortError < StandardError
+      def initialize(message = "The operation was aborted") = super
+    end
+
     # Node's AggregateError from createLoopbackConnection: `errors` are the
     # per-address failures (127.0.0.1 first), `details` their Node-style text.
     class AggregateError < StandardError
@@ -79,11 +86,16 @@ module Portless
     # reused connection. `retries: 1` disables async-http's own retries
     # (attempt 1 is the last); forward decides on the single replay.
     class UpstreamClient < Async::HTTP::Client
-      def initialize(endpoint, **options)
-        super(endpoint, retries: 1, **options)
+      # async-pool creates one connection at a time by default; upstream lets
+      # up to MAX_PENDING_UPSTREAM_DIALS dials run at once (the endpoint's
+      # semaphore enforces that limit).
+      def initialize(endpoint, tracker = nil, **options)
+        super(endpoint, retries: 1, concurrency: MAX_PENDING_UPSTREAM_DIALS, **options)
+        @tracker = tracker
       end
 
       def make_response(request, connection, attempt)
+        @tracker&.upstream_state!(:sent)
         reused = connection.count.positive?
         super
       rescue *RESET_ERRORS => e
@@ -94,7 +106,9 @@ module Portless
 
     TLS_502_DETAIL = "Could not connect to the target app over HTTPS. Check that it supports TLS on the configured port."
 
-    attr_reader :port
+    # `port` is proxyPort (the port URLs and redirects name); `listen_port`
+    # is the port actually bound once `run` has bound the primary listener.
+    attr_reader :port, :listen_port
 
     # Mirrors ProxyServerOptions. `routes` is a callable returning the current
     # route table (getRoutes). `tls` is nil, `{ cert:, key:, ca:, state_dir: }`
@@ -105,14 +119,14 @@ module Portless
     # `on_auxiliary_listen(kind, host, port, error)` reports each non-primary
     # bind (kind :proxy or :redirect, error nil on success); `on_listening`
     # fires once the primary is bound.
-    def initialize(port:, routes:, bind_targets: Privilege.bind_targets(false), tlds: [ Constants::DEFAULT_TLD ],
+    def initialize(port:, routes:, bind_targets: Privilege.bind_targets(false), tld: Constants::DEFAULT_TLD, tlds: [ tld ],
                    strict: true, tls: nil, loopback_only: false, on_hosts_sync_request: nil, hosts_sync_token: nil,
                    on_error: ->(message) { warn(message) }, redirect_http: false, on_listening: nil,
                    on_auxiliary_listen: nil)
       @port = port
       @bind_targets = bind_targets
       @get_routes = routes
-      @tld_suffixes = tlds.uniq.map { |value| ".#{value}" }
+      @tld_suffixes = (tlds.empty? ? [ tld ] : tlds).uniq.map { |value| ".#{value}" }
       @primary_tld_suffix = @tld_suffixes.first || ".localhost"
       @strict = strict
       @tls = tls
@@ -126,6 +140,11 @@ module Portless
       @clients = {}
       @dial_limits = {}
       @sockets = []
+      # Requests between routing and the upstream response, by fiber:
+      # :waiting (for a dial slot), :dialing, :sent (in flight).
+      @upstream_waits = {}
+      @upstream_limits = {}
+      @closing = false
     end
 
     # ---------------------------------------------------------------------
@@ -133,9 +152,12 @@ module Portless
 
     # Bind every listener, then serve until stopped (blocking). The primary
     # bind raises (EADDRINUSE / EACCES are the caller's to explain); other
-    # binds are best-effort and reported through on_auxiliary_listen.
-    def run
-      listeners = bind_listeners
+    # binds are best-effort and reported through on_auxiliary_listen. Like
+    # Node's server.listen(port), the listen port may differ from proxyPort
+    # (0 picks a free one).
+    def run(listen_port = @port, redirect_port: Constants::HTTP_PORT)
+      listeners = bind_listeners(listen_port, redirect_port)
+      @closing = false
       @stop_reader, @stop_writer = IO.pipe
       @on_listening&.call
       Sync do |task|
@@ -144,6 +166,9 @@ module Portless
         end
         task.async do
           @stop_reader.wait_readable
+          close_upstream
+          # In-flight responses finish (async-http defers the stop until the
+          # response is written); idle connections close now.
           task.stop
         end
       end
@@ -154,6 +179,9 @@ module Portless
     # Ask a running proxy to shut down. Safe from a signal trap or another
     # thread: it only writes to a self-pipe the reactor watches.
     def stop
+      # Like server.close(): new upstream dials abort from now on, even from a
+      # request already being routed; the reactor cancels the rest.
+      @closing = true
       @stop_writer&.write_nonblock(".")
     rescue StandardError
       nil
@@ -174,9 +202,25 @@ module Portless
     # connection is TLS. Returns a Protocol::HTTP::Response.
     def call(request, peer: nil, encrypted: !!@tls, replay: false)
       return handle_extended_connect(request, peer) if request.method == "CONNECT"
-      return handle_upgrade(request, peer, encrypted) if request.protocol
+      return handle_upgrade(request, peer, encrypted) if upgrade_request?(request)
 
       handle_request(request, peer, encrypted, replay)
+    end
+
+    # Node raises 'upgrade' only for `Connection: upgrade` plus an Upgrade
+    # header; async-http extracts any Upgrade header into `protocol` (and
+    # reads the body as a tunnel). Anything else is an ordinary request.
+    def upgrade_request?(request)
+      return false unless request.protocol
+      return true unless request.version.to_s.start_with?("HTTP/1")
+
+      connection = header_value(request, "connection").to_s.downcase.split(",").map(&:strip)
+      return true if connection.include?("upgrade")
+
+      request.protocol = nil
+      framed = header_value(request, "content-length") || header_value(request, "transfer-encoding")
+      request.body = nil unless framed
+      false
     end
 
     # Exact hostname, tailscale authority, tailscale hostname, then (unless
@@ -243,23 +287,28 @@ module Portless
 
     # --- listeners -------------------------------------------------------
 
-    def bind_listeners
+    def bind_listeners(listen_port, redirect_port)
       listeners = []
       primary, *rest = @bind_targets
-      rest.each { |target| bind_auxiliary(listeners, target, @port, :proxy) }
+      rest.each { |target| bind_auxiliary(listeners, target, listen_port, :proxy) }
       if @tls && @redirect_http
-        @bind_targets.each { |target| bind_auxiliary(listeners, target, Constants::HTTP_PORT, :redirect) }
+        @bind_targets.each { |target| bind_auxiliary(listeners, target, redirect_port, :redirect) }
       end
-      listeners << [ bind_socket(primary, @port), :proxy ]
+      socket = bind_socket(primary, listen_port)
+      @listen_port = socket.local_address.ip_port
+      listeners << [ socket, :proxy ]
       listeners
     rescue StandardError
       close
       raise
     end
 
+    # Reports the bound port (the requested one, unless that was 0).
     def bind_auxiliary(listeners, target, port, kind)
       begin
-        listeners << [ bind_socket(target, port), kind ]
+        socket = bind_socket(target, port)
+        listeners << [ socket, kind ]
+        port = socket.local_address.ip_port
       rescue SystemCallError => e
         error = e
       end
@@ -267,17 +316,7 @@ module Portless
     end
 
     def bind_socket(target, port)
-      addr = Addrinfo.tcp(target[:host], port)
-      socket = Socket.new(addr.afamily, Socket::SOCK_STREAM, 0)
-      begin
-        socket.setsockopt(Socket::SOL_SOCKET, Socket::SO_REUSEADDR, true)
-        socket.setsockopt(Socket::IPPROTO_IPV6, Socket::IPV6_V6ONLY, true) if target[:ipv6_only]
-        socket.bind(addr)
-        socket.listen(Socket::SOMAXCONN)
-      rescue StandardError
-        socket.close
-        raise
-      end
+      socket = Privilege.listen_on_proxy_interface(port, target)
       @sockets << socket
       socket
     end
@@ -309,6 +348,7 @@ module Portless
           serve(peer, address, Async::HTTP::Protocol::HTTP11, "http") { |request| plain_on_tls_port(request, address) }
         end
       else
+        Fiber[:portless_client_io] = peer
         serve(peer, address, Async::HTTP::Protocol::HTTP11, "http") { |request| call(request, peer: address, encrypted: false) }
       end
     rescue StandardError
@@ -408,7 +448,10 @@ module Portless
       raw_host = request_host(request)
       # Node's HTTP/1.1 parser rejects a request without Host before
       # portless's handler runs: a bare 400, no headers, no body.
-      return ::Protocol::HTTP::Response[400, {}, []] if raw_host.empty? && request.version == "HTTP/1.1"
+      # An empty Host header is present, so it reaches the handler below.
+      if request.authority.nil? && header_value(request, "host").nil? && request.version == "HTTP/1.1"
+        return ::Protocol::HTTP::Response[400, {}, []]
+      end
 
       extra = { PORTLESS_HEADER => "1" }
       add_hosts_sync_proof(request, peer, raw_host, extra)
@@ -433,11 +476,16 @@ module Portless
     end
 
     def forward(request, route, hops, peer, encrypted, replay)
+      raise DropConnection if @closing
+
       headers = build_upstream_headers(request, route, hops, peer, encrypted, strip_hop_by_hop: true)
+      # Node's keep-alive agent announces the pooled connection.
+      headers.add("connection", "keep-alive")
       upstream_request = ::Protocol::HTTP::Request.new(
         "http", headers.delete("host").to_s, request.method, request.path, nil, headers, replay ? nil : request.body
       )
-      response = client_for(route).call(upstream_request)
+      response = track_upstream(route) { client_for(route).call(upstream_request) }
+      watch_response_disconnect(response)
       rewrite_upstream_location(response.headers, route, request, encrypted)
       HOP_BY_HOP_HEADERS.each { |key| response.headers.delete(key) } if encrypted
       response
@@ -450,15 +498,100 @@ module Portless
       end
 
       bad_gateway(request, e)
+    rescue DropConnection
+      raise
     rescue StandardError => e
       bad_gateway(request, e)
+    end
+
+    # --- upstream lifecycle (proxy.ts whenUpstreamReady / closeUpstream) ---
+
+    public
+
+    # Called from the requesting fiber as its upstream request progresses.
+    def upstream_state!(state)
+      fiber = Fiber.current
+      @upstream_waits[fiber] = state if @upstream_waits.key?(fiber)
+    end
+
+    def closing? = @closing
+
+    private
+
+    def track_upstream(route)
+      fiber = Fiber.current
+      @upstream_waits[fiber] = :waiting
+      @upstream_limits[fiber] = dial_limit(route)
+      watcher = watch_client_disconnect(fiber)
+      yield
+    ensure
+      @upstream_waits.delete(fiber)
+      @upstream_limits.delete(fiber)
+      watcher&.stop
+    end
+
+    # A request queued behind a full set of dials is dropped; a dial in
+    # progress is aborted (502, not logged). A request that is merely on its
+    # way to dialing aborts when it gets there; requests already sent are
+    # left alone.
+    def cancel_upstream(fiber)
+      exception = case @upstream_waits[fiber]
+      when :waiting then DropConnection if @upstream_limits[fiber]&.blocking?
+      when :dialing then AbortError
+      end
+      return unless exception && fiber.alive?
+
+      Fiber.scheduler.raise(fiber, exception)
+    rescue FiberError
+      nil
+    end
+
+    # Queued requests are dropped first, so a slot freed by an aborted dial
+    # cannot start another one.
+    def close_upstream
+      @closing = true
+      waiting, dialing = @upstream_waits.keys.partition { |fiber| @upstream_waits[fiber] == :waiting }
+      (waiting + dialing).each { |fiber| cancel_upstream(fiber) }
+    end
+
+    # The client closing mid-response (a closed tab on an event stream) ends
+    # the upstream response too, like Node's res 'close' -> proxyReq.destroy().
+    def watch_response_disconnect(response)
+      io = Fiber[:portless_client_io]
+      body = response.body
+      return unless io && body
+
+      watcher = Async::Task.current.async(transient: true) do
+        io.wait_readable
+        peeked = io.recv_nonblock(1, Socket::MSG_PEEK, exception: false)
+        body.close(EOFError.new("client disconnected")) if peeked.nil? || peeked == ""
+      rescue StandardError
+        body.close(EOFError.new("client disconnected"))
+      end
+      response.body = ::Protocol::HTTP::Body::Completable.new(body, ->(_error) { watcher.stop unless watcher.current? })
+    end
+
+    # Node aborts the upstream request when the client socket closes. A plain
+    # HTTP/1.1 connection is idle while its request waits upstream, so EOF on
+    # it means the client went away.
+    def watch_client_disconnect(fiber)
+      io = Fiber[:portless_client_io]
+      return unless io
+
+      Async::Task.current.async(transient: true) do
+        io.wait_readable
+        peeked = io.recv_nonblock(1, Socket::MSG_PEEK, exception: false)
+        cancel_upstream(fiber) if peeked.nil? || peeked == ""
+      rescue StandardError
+        cancel_upstream(fiber)
+      end
     end
 
     def bodiless?(request) = request.body.nil? || request.body.length&.zero?
 
     def bad_gateway(request, error)
       host = request_host(request)
-      log_error("Proxy error for #{host}: #{format_proxy_error(error)}")
+      log_error("Proxy error for #{host}: #{format_proxy_error(error)}") unless error.is_a?(AbortError)
       detail = if tls_error?(error)
                  TLS_502_DETAIL
       elsif error_code(error) == Errno::ECONNREFUSED
@@ -600,7 +733,7 @@ module Portless
       upstream_request = ::Protocol::HTTP::Request.new(
         "http", headers.delete("host").to_s, request.method, request.path, nil, headers, request.body, request.protocol
       )
-      response = client_for(route, websocket: true).call(upstream_request)
+      response = track_upstream(route) { client_for(route, websocket: true).call(upstream_request) }
       if response.status == 101
         # The backend's 101 headers relay verbatim, except the two the
         # protocol layer writes itself when it switches protocols.
@@ -614,8 +747,13 @@ module Portless
         response.headers.delete("connection")
       end
       response
+    rescue DropConnection
+      raise
     rescue StandardError => e
-      log_error("WebSocket proxy error for #{request_host(request)}: #{format_proxy_error(e)}")
+      log_error("WebSocket proxy error for #{request_host(request)}: #{format_proxy_error(e)}") unless e.is_a?(AbortError)
+      # The tunnel never opened: stop reading the client side so the
+      # connection closes after the 502 (Node's socket.end).
+      request.body&.close rescue nil
       body = if tls_error?(e)
                "Bad Gateway: could not connect to the target app over HTTPS. Check that it supports TLS on the configured port.\n"
       else
@@ -652,7 +790,7 @@ module Portless
       upstream_request = ::Protocol::HTTP::Request.new(
         "http", headers.delete("host").to_s, "GET", request.path, nil, headers, request.body, "websocket"
       )
-      response = client_for(route, websocket: true).call(upstream_request)
+      response = track_upstream(route) { client_for(route, websocket: true).call(upstream_request) }
 
       if response.status == 101
         expected = [ Digest::SHA1.digest(ws_key + WS_GUID) ].pack("m0")
@@ -669,8 +807,10 @@ module Portless
         HOP_BY_HOP_HEADERS.each { |key| response.headers.delete(key) }
       end
       with_headers(response, extra)
+    rescue DropConnection
+      raise
     rescue StandardError => e
-      log_error("WebSocket proxy error for #{request_host(request)}: #{format_proxy_error(e)}")
+      log_error("WebSocket proxy error for #{request_host(request)}: #{format_proxy_error(e)}") unless e.is_a?(AbortError)
       body = tls_error?(e) ? "Bad Gateway: could not connect to the target app over HTTPS. Check that it supports TLS on the configured port.\n" : "Bad Gateway: the target app is not responding\n"
       with_headers(text(502, body), { PORTLESS_HEADER => "1" })
     end
@@ -742,15 +882,23 @@ module Portless
       value.transform_keys(&:to_sym)
     end
 
+    def upstream_key(route)
+      upstream = upstream_of(route)
+      [ route.port.to_i, !!upstream[:tls], upstream[:host].to_s ]
+    end
+
+    def dial_limit(route)
+      @dial_limits[upstream_key(route)] ||= Async::Semaphore.new(MAX_PENDING_UPSTREAM_DIALS)
+    end
+
     def client_for(route, websocket: false)
       upstream = upstream_of(route)
-      key = [ route.port.to_i, !!upstream[:tls], upstream[:host].to_s ]
-      limit = @dial_limits[key] ||= Async::Semaphore.new(MAX_PENDING_UPSTREAM_DIALS)
-      endpoint = UpstreamEndpoint.new(route.port.to_i, upstream, limit)
+      key = upstream_key(route)
+      endpoint = UpstreamEndpoint.new(route.port.to_i, upstream, dial_limit(route), self)
       # WebSocket connections are hijacked by the upgrade, so never pool them.
       return UpstreamClient.new(endpoint, limit: 1) if websocket
 
-      @clients[key] ||= UpstreamClient.new(endpoint)
+      @clients[key] ||= UpstreamClient.new(endpoint, self)
     end
 
     # The backend dial: race 127.0.0.1 and ::1 (so ::1-only backends work),
@@ -758,10 +906,11 @@ module Portless
     # routes, all within one connect timeout, behind a per-backend
     # pending-dial limit (proxy.ts connectUpstream).
     class UpstreamEndpoint
-      def initialize(port, upstream, limit)
+      def initialize(port, upstream, limit, tracker)
         @port = port
         @upstream = upstream
         @limit = limit
+        @tracker = tracker
       end
 
       def protocol = Async::HTTP::Protocol::HTTP11
@@ -772,7 +921,10 @@ module Portless
       def inspect = "#<#{self.class} #{self}>"
 
       def connect
+        raise AbortError if @tracker.closing?
+
         @limit.acquire do
+          @tracker.upstream_state!(:dialing)
           Async::Task.current.with_timeout(UPSTREAM_CONNECT_TIMEOUT) { dial }
         rescue Async::TimeoutError
           raise Errno::ETIMEDOUT, "Upstream connection timed out"
@@ -822,12 +974,16 @@ module Portless
       attempts = LOOPBACK_HOSTS.each_with_index.map do |(host, family), index|
         task.async do
           socket = Socket.new(family, Socket::SOCK_STREAM, 0)
+          handed_off = false
           begin
             socket.connect(Socket.pack_sockaddr_in(port, host))
             results << [ :ok, socket ]
+            handed_off = true
           rescue StandardError => e
-            socket.close
             results << [ :error, [ index, e ] ]
+          ensure
+            # The losing attempt is stopped mid-connect: destroy its socket.
+            socket.close unless handed_off
           end
         end
       end

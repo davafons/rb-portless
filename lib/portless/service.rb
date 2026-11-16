@@ -69,7 +69,7 @@ module Portless
     end
 
     # service.ts parseServiceInstallConfig.
-    def parse_install_config(args, env = ENV, allow_runtime_flags: false)
+    def parse_service_install_config(args, env = ENV, allow_runtime_flags: false)
       config = default_config.merge(extra_env: collect_extra_env(env))
       config[:state_dir] = env["PORTLESS_STATE_DIR"] if env["PORTLESS_STATE_DIR"] && !env["PORTLESS_STATE_DIR"].empty?
 
@@ -185,7 +185,7 @@ module Portless
       { home: Dir.home, uid: Process.uid.to_s, gid: Process.gid.to_s, username: Etc.getlogin }
     end
 
-    def build_proxy_command(entry_argv, config)
+    def build_proxy_command(entry_script, config)
       args = Daemon.build_start_config(
         use_https: config[:use_https], custom_cert_path: config[:custom_cert_path],
         custom_key_path: config[:custom_key_path], lan_mode: config[:lan_mode], lan_ip: config[:lan_ip],
@@ -193,7 +193,7 @@ module Portless
         use_wildcard: config[:use_wildcard], unprivileged: config[:unprivileged], foreground: true,
         include_port: true, proxy_port: config[:proxy_port], skip_trust: true
       )[:args]
-      [ *entry_argv, "proxy", "start", *args ]
+      [ *entry_script, "proxy", "start", *args ]
     end
 
     def build_service_env(ctx)
@@ -288,10 +288,10 @@ module Portless
       UNIT
     end
 
-    # service.ts buildServiceSpec. entry_argv = how to run this CLI (ruby -I
-    # lib exe/rb-portless), i.e. upstream's [nodePath, entryScript].
-    def build_spec(platform:, entry_argv:, user_home:, uid: nil, gid: nil, username: nil, state_dir: nil,
-                   path_env: nil, install_config: {})
+    # service.ts buildServiceSpec. node_path + entry_script run this CLI:
+    # ruby + [-I, lib, exe/rb-portless] (entry_script may be a list).
+    def build_service_spec(platform:, node_path:, entry_script:, user_home:, uid: nil, gid: nil, username: nil,
+                           state_dir: nil, path_env: nil, install_config: {})
       config = default_config.merge(install_config)
       config[:extra_env] = install_config[:extra_env] || {}
       config[:tlds] = if config[:lan_mode]
@@ -305,7 +305,7 @@ module Portless
       ctx = { platform: platform, state_dir: state_dir, config: config,
               user: { home: user_home, uid: uid, gid: gid, username: username },
               path_env: path_env.to_s.empty? ? DEFAULT_PATH : path_env }
-      command = build_proxy_command(entry_argv, config)
+      command = [ node_path, *build_proxy_command(entry_script, config) ]
 
       case platform
       when "darwin"
@@ -319,15 +319,21 @@ module Portless
       end
     end
 
-    def current_spec(install_config = nil)
+    # How this CLI runs: upstream's process.execPath and entryScript.
+    def node_path = Privilege.cli_argv.first
+    def default_entry_script = Privilege.cli_argv.drop(1)
+
+    def current_service_spec(entry_script, install_config = nil)
       platform = Privilege.host_platform
+      raise Error, "Unsupported platform: #{platform}" unless %w[darwin linux].include?(platform)
+
       user = resolve_user_context
       state_dir = install_config&.dig(:state_dir) || (ENV["PORTLESS_STATE_DIR"].to_s.empty? ? nil : ENV["PORTLESS_STATE_DIR"]) ||
                   default_state_dir(user[:home])
       config = install_config || default_config.merge(state_dir: state_dir, extra_env: collect_extra_env(ENV))
-      build_spec(platform: platform, entry_argv: Privilege.cli_argv, user_home: user[:home], uid: user[:uid],
-                 gid: user[:gid], username: user[:username], state_dir: state_dir, path_env: ENV["PATH"],
-                 install_config: config)
+      build_service_spec(platform: platform, node_path: node_path, entry_script: entry_script, user_home: user[:home],
+                         uid: user[:uid], gid: user[:gid], username: user[:username], state_dir: state_dir,
+                         path_env: ENV["PATH"], install_config: config)
     end
 
     # Words with "…" quoting and \" / \\ escapes. service.ts parseQuotedWords.
@@ -364,9 +370,9 @@ module Portless
 
     def read_installed_snapshot(spec)
       if spec[:platform] == "darwin"
-        return nil unless File.exist?(spec[:plist_path])
+        return nil unless file_exist?(spec[:plist_path])
 
-        plist = File.read(spec[:plist_path])
+        plist = read_file(spec[:plist_path])
         args_block = plist[%r{<key>ProgramArguments</key>\s*<array>([\s\S]*?)</array>}, 1] or return nil
         env_block = plist[%r{<key>EnvironmentVariables</key>\s*<dict>([\s\S]*?)</dict>}, 1]
         command = args_block.scan(%r{<string>([\s\S]*?)</string>}).map { |(v)| xml_unescape(v) }
@@ -375,11 +381,11 @@ module Portless
         return { command: command, env: env }
       end
 
-      return nil unless File.exist?(spec[:unit_path])
+      return nil unless file_exist?(spec[:unit_path])
 
       env = {}
       command = nil
-      File.read(spec[:unit_path]).each_line do |line|
+      read_file(spec[:unit_path]).each_line do |line|
         line = line.chomp
         if line.start_with?("Environment=")
           entry = line.delete_prefix("Environment=")
@@ -398,7 +404,7 @@ module Portless
       idx = snapshot[:command].each_index.find { |i| snapshot[:command][i] == "proxy" && snapshot[:command][i + 1] == "start" }
       return nil unless idx
 
-      parsed = parse_install_config([ "service", "install", *snapshot[:command][(idx + 2)..] ], snapshot[:env],
+      parsed = parse_service_install_config([ "service", "install", *snapshot[:command][(idx + 2)..] ], snapshot[:env],
                                     allow_runtime_flags: true)
       parsed.merge(state_dir: parsed[:state_dir] || snapshot[:env]["PORTLESS_STATE_DIR"] || fallback[:state_dir])
     rescue StandardError
@@ -416,27 +422,34 @@ module Portless
         "HOME=#{home}", "PORTLESS_STATE_DIR=#{state_dir}" ]
     end
 
-    # sudo argv for `service uninstall` (used by `clean`).
-    def uninstall_sudo_args(home: Dir.home, state_dir: nil, env: ENV)
+    # sudo argv for `service uninstall` (used by `clean`). service.ts buildServiceUninstallSudoArgs.
+    def build_service_uninstall_sudo_args(entry_script = default_entry_script, node_path: self.node_path,
+                                          home: Dir.home, state_dir: nil, env: ENV)
       state_dir ||= env["PORTLESS_STATE_DIR"].to_s.empty? ? default_state_dir(home) : env["PORTLESS_STATE_DIR"]
-      [ *elevated_env_args(home: home, state_dir: state_dir, env: env), *Privilege.cli_argv, "service", "uninstall" ]
+      [ *elevated_env_args(home: home, state_dir: state_dir, env: env), node_path, *entry_script, "service", "uninstall" ]
     end
 
     # Re-run under sudo (exits with its status) unless already elevated.
-    def require_unix_elevation(args)
+    def require_unix_elevation(args, runner)
       return unless %w[darwin linux].include?(Privilege.host_platform)
       return if Privilege.root? || ENV[INTERNAL_ELEVATED_ENV] == "1"
 
       home = Dir.home
       state_dir = ENV["PORTLESS_STATE_DIR"].to_s.empty? ? default_state_dir(home) : ENV["PORTLESS_STATE_DIR"]
-      ok = system("sudo", *elevated_env_args(home: home, state_dir: state_dir,
-                                             extra_env: { INTERNAL_ELEVATED_ENV => "1" }),
-                  *Privilege.cli_argv, *args)
-      exit(ok ? 0 : ($?&.exitstatus || 1))
+      result = runner.call("sudo", [ *elevated_env_args(home: home, state_dir: state_dir,
+                                                        extra_env: { INTERNAL_ELEVATED_ENV => "1" }),
+                                     node_path, *args ], stdio: "inherit")
+      exit(result[:status] || 1)
     end
 
-    def run_cmd(*cmd)
-      out, errout, status = Open3.capture3(*cmd)
+    # → {status:, stdout:, stderr:, error:}; stdio: "inherit" runs attached.
+    def default_runner(command, args, stdio: "pipe")
+      if stdio == "inherit"
+        system(command, *args)
+        return { status: $?&.exitstatus, stdout: "", stderr: "" }
+      end
+
+      out, errout, status = Open3.capture3(command, *args)
       { status: status.exitstatus, stdout: out, stderr: errout }
     rescue SystemCallError => e
       { status: nil, stdout: "", stderr: "", error: e }
@@ -447,10 +460,12 @@ module Portless
         result[:error]&.message || "#{command} failed"
     end
 
-    def run_required(*cmd)
-      result = run_cmd(*cmd)
-      raise Error, command_failure(result, cmd.first).strip unless result[:status] == 0 # rubocop:disable Style/NumericPredicate
+    def run_required(runner, command, args)
+      result = runner.call(command, args)
+      raise Error, command_failure(result, command).strip unless result[:status] == 0 # rubocop:disable Style/NumericPredicate
     end
+
+    def run_optional(runner, command, args) = runner.call(command, args)
 
     def target_missing?(result)
       "#{result[:stderr]}\n#{result[:stdout]}".match?(
@@ -458,22 +473,27 @@ module Portless
       )
     end
 
-    def run_removal_step(*cmd)
-      result = run_cmd(*cmd)
+    # Runs a stop or delete step, ignoring a non-zero status only when the target is already gone.
+    def run_removal_step(runner, command, args)
+      result = runner.call(command, args)
       return if result[:status] == 0 || target_missing?(result) # rubocop:disable Style/NumericPredicate
       raise result[:error] if result[:error]
 
-      raise Error, command_failure(result, cmd.first).strip
+      raise Error, command_failure(result, command).strip
     end
 
     def removal_needs_elevation?(error)
-      return false if Constants::WINDOWS || Privilege.root? || ENV[INTERNAL_ELEVATED_ENV] == "1"
+      return false if Privilege.host_platform == "win32" || Privilege.root? || ENV[INTERNAL_ELEVATED_ENV] == "1"
       return false if error.is_a?(Errno::ENOENT) || error.is_a?(Errno::EINVAL) || error.is_a?(Errno::ENOTDIR)
 
       true
     end
 
-    def stop_existing_proxy(proxy_port)
+    def stop_proxy_on_port(entry_script, runner, proxy_port)
+      run_required(runner, node_path, [ *entry_script, "proxy", "stop", "--port", proxy_port.to_s ])
+    end
+
+    def stop_existing_proxy(entry_script, runner, proxy_port)
       ports = []
       begin
         state = Daemon.discover_state
@@ -482,7 +502,7 @@ module Portless
         nil
       end
       ports << proxy_port
-      ports.uniq.each { |port| run_required(*Privilege.cli_argv, "proxy", "stop", "--port", port.to_s) }
+      ports.uniq.each { |port| stop_proxy_on_port(entry_script, runner, port) }
     end
 
     def prepare_state(state_dir)
@@ -519,33 +539,40 @@ module Portless
                    "#{support[:reason] ? "\n#{support[:reason]}" : ''}"
     end
 
-    def install_from_args(args)
-      config = normalize_install_paths(parse_install_config(args))
+    # File-system calls, one per upstream fs.* call, so tests can stub them.
+    def file_exist?(path) = File.exist?(path)
+    def read_file(path) = File.read(path)
+    def write_file(path, content) = File.write(path, content)
+    def chmod_file(path, mode) = File.chmod(mode, path)
+    def rm_file(path) = FileUtils.rm_f(path)
+
+    def install_service(entry_script, runner, args)
+      config = normalize_install_paths(parse_service_install_config(args))
       ensure_config_supported(config)
-      require_unix_elevation(args)
-      spec = current_spec(config)
+      require_unix_elevation([ *entry_script, *args ], runner)
+      spec = current_service_spec(entry_script, config)
       prepare_state(spec[:state_dir])
       with_state_dir(spec[:state_dir]) do
         prepare_trust(spec[:state_dir]) if spec[:config][:use_https] && !spec[:config][:custom_cert_path]
       end
 
       if spec[:platform] == "darwin"
-        run_cmd("launchctl", "bootout", "system", spec[:plist_path])
-        stop_existing_proxy(spec[:config][:proxy_port])
-        File.write(spec[:plist_path], spec[:plist])
-        File.chmod(0o644, spec[:plist_path])
-        run_required("chown", "root:wheel", spec[:plist_path])
-        run_required("launchctl", "bootstrap", "system", spec[:plist_path])
-        run_required("launchctl", "enable", "system/#{spec[:label]}")
-        run_required("launchctl", "kickstart", "-k", "system/#{spec[:label]}")
+        run_optional(runner, "launchctl", [ "bootout", "system", spec[:plist_path] ])
+        stop_existing_proxy(entry_script, runner, spec[:config][:proxy_port])
+        write_file(spec[:plist_path], spec[:plist])
+        chmod_file(spec[:plist_path], 0o644)
+        run_required(runner, "chown", [ "root:wheel", spec[:plist_path] ])
+        run_required(runner, "launchctl", [ "bootstrap", "system", spec[:plist_path] ])
+        run_required(runner, "launchctl", [ "enable", "system/#{spec[:label]}" ])
+        run_required(runner, "launchctl", [ "kickstart", "-k", "system/#{spec[:label]}" ])
       else
-        run_cmd("systemctl", "disable", "--now", spec[:service_name])
-        stop_existing_proxy(spec[:config][:proxy_port])
-        File.write(spec[:unit_path], spec[:unit])
-        File.chmod(0o644, spec[:unit_path])
-        run_required("systemctl", "daemon-reload")
-        run_required("systemctl", "enable", spec[:service_name])
-        run_required("systemctl", "restart", spec[:service_name])
+        run_optional(runner, "systemctl", [ "disable", "--now", spec[:service_name] ])
+        stop_existing_proxy(entry_script, runner, spec[:config][:proxy_port])
+        write_file(spec[:unit_path], spec[:unit])
+        chmod_file(spec[:unit_path], 0o644)
+        run_required(runner, "systemctl", [ "daemon-reload" ])
+        run_required(runner, "systemctl", [ "enable", spec[:service_name] ])
+        run_required(runner, "systemctl", [ "restart", spec[:service_name] ])
       end
 
       puts Colors.green("rb-portless service installed.")
@@ -561,51 +588,51 @@ module Portless
       ENV["PORTLESS_STATE_DIR"] = previous
     end
 
-    def uninstall
-      require_unix_elevation(%w[service uninstall])
-      spec = current_spec
+    def uninstall_service(entry_script, runner)
+      require_unix_elevation([ *entry_script, "service", "uninstall" ], runner)
+      spec = current_service_spec(entry_script)
       if spec[:platform] == "darwin"
-        run_removal_step("launchctl", "bootout", "system/#{spec[:label]}")
-        FileUtils.rm_f(spec[:plist_path])
+        run_removal_step(runner, "launchctl", [ "bootout", "system/#{spec[:label]}" ])
+        rm_file(spec[:plist_path])
       else
-        run_removal_step("systemctl", "disable", "--now", spec[:service_name])
-        FileUtils.rm_f(spec[:unit_path])
-        run_cmd("systemctl", "daemon-reload")
+        run_removal_step(runner, "systemctl", [ "disable", "--now", spec[:service_name] ])
+        rm_file(spec[:unit_path])
+        run_optional(runner, "systemctl", [ "daemon-reload" ])
       end
       puts Colors.green("rb-portless service uninstalled.")
     end
 
     # Best-effort removal for `clean` (caller already elevated if needed).
-    # → {removed:, installed:, error:, needs_elevation:}
-    def try_uninstall
+    # → {removed:, installed:, error:, needs_elevation:}. service.ts tryUninstallService.
+    def try_uninstall_service(entry_script = default_entry_script, runner = method(:default_runner))
       installed = false
-      spec = current_spec
+      spec = current_service_spec(entry_script)
       if spec[:platform] == "darwin"
-        installed = File.exist?(spec[:plist_path])
+        installed = file_exist?(spec[:plist_path])
         return { removed: false, installed: false } unless installed
 
-        run_removal_step("launchctl", "bootout", "system/#{spec[:label]}")
-        FileUtils.rm_f(spec[:plist_path])
+        run_removal_step(runner, "launchctl", [ "bootout", "system/#{spec[:label]}" ])
+        rm_file(spec[:plist_path])
       else
-        installed = File.exist?(spec[:unit_path])
+        installed = file_exist?(spec[:unit_path])
         return { removed: false, installed: false } unless installed
 
-        run_removal_step("systemctl", "disable", "--now", spec[:service_name])
-        FileUtils.rm_f(spec[:unit_path])
-        run_cmd("systemctl", "daemon-reload")
+        run_removal_step(runner, "systemctl", [ "disable", "--now", spec[:service_name] ])
+        rm_file(spec[:unit_path])
+        run_optional(runner, "systemctl", [ "daemon-reload" ])
       end
       { removed: true, installed: true }
     rescue StandardError => e
       { removed: false, installed: installed, error: e.message, needs_elevation: installed && removal_needs_elevation?(e) }
     end
 
-    def status_info
-      spec = current_spec
+    def get_service_status(entry_script, runner) # rubocop:disable Naming/AccessorMethodName
+      spec = current_service_spec(entry_script)
       config = read_installed_config(spec) || spec[:config]
       proxy_running = Health.proxy_running?(config[:proxy_port], config[:use_https])
       if spec[:platform] == "darwin"
-        installed = File.exist?(spec[:plist_path])
-        result = run_cmd("launchctl", "print", "system/#{spec[:label]}")
+        installed = file_exist?(spec[:plist_path])
+        result = runner.call("launchctl", [ "print", "system/#{spec[:label]}" ])
         output = "#{result[:stdout]}#{result[:stderr]}"
         state = if result[:status] == 0 && output.match?(/state = running|pid = \d+/) then "running" # rubocop:disable Style/NumericPredicate
         elsif installed then "installed"
@@ -615,9 +642,9 @@ module Portless
                  details: spec[:plist_path] }
       end
 
-      enabled = run_cmd("systemctl", "is-enabled", spec[:service_name])
-      active = run_cmd("systemctl", "is-active", spec[:service_name])
-      installed = enabled[:status] == 0 || active[:status] == 0 || File.exist?(spec[:unit_path]) # rubocop:disable Style/NumericPredicate
+      enabled = runner.call("systemctl", [ "is-enabled", spec[:service_name] ])
+      active = runner.call("systemctl", [ "is-active", spec[:service_name] ])
+      installed = enabled[:status] == 0 || active[:status] == 0 || file_exist?(spec[:unit_path]) # rubocop:disable Style/NumericPredicate
       active_text = active[:stdout].to_s.strip
       state = if active[:status] == 0 then active_text.empty? ? "active" : active_text # rubocop:disable Style/NumericPredicate
       elsif installed then "installed"
@@ -627,8 +654,8 @@ module Portless
         details: spec[:unit_path] }
     end
 
-    def status
-      info = status_info
+    def print_service_status(entry_script, runner)
+      info = get_service_status(entry_script, runner)
       config = info[:config]
       puts Colors.bold("rb-portless service")
       puts "  Manager state: #{info[:manager_state]}"
@@ -648,19 +675,19 @@ module Portless
     def print_help = Object.new.extend(Help).print_service_help
 
     # `rb-portless service …` (argv includes "service"). service.ts handleService.
-    def handle(args)
+    def handle_service(args, entry_script: default_entry_script, runner: method(:default_runner))
       action = args[1]
       unless action
         print_help
         exit 0
       end
-      return install_from_args(args) if action == "install"
+      return install_service(entry_script, runner, args) if action == "install"
       unless %w[uninstall status].include?(action)
         raise UsageError.new("Unknown service command \"#{action}\".", [ "See: rb-portless service --help" ])
       end
       raise UsageError, "Unexpected argument \"#{args[2]}\" for rb-portless service #{action}." if args.length > 2
 
-      action == "uninstall" ? uninstall : status
+      action == "uninstall" ? uninstall_service(entry_script, runner) : print_service_status(entry_script, runner)
     end
   end
 end

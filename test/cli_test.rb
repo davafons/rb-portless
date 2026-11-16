@@ -391,7 +391,7 @@ class RunnerTunnelExitTest < Minitest::Test
   end
 
   def start_with_early_exit
-    handle = Portless::Tunnel::Handle.new("https://x.ngrok.app", 42)
+    handle = Portless::Tunnel::Handle.new("https://x.ngrok.app", Struct.new(:pid).new(42))
     start = lambda { |*_args, **_opts, &on_exit|
       on_exit.call(1, nil) # exits before the route records its URL
       handle

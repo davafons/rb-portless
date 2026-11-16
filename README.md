@@ -83,7 +83,9 @@ Routing is exact by default: an unregistered subdomain gets a 404. Start the pro
 specific registered parent, `myapp.localhost`.
 
 Outside LAN mode, the proxy listens only on `127.0.0.1` and `::1`. It keeps `/etc/hosts`
-in sync for route hostnames, which custom TLDs such as `.test` need.
+in sync for route hostnames, which custom TLDs such as `.test` need. If a route hostname
+will not resolve, the command that registered it warns and points you to
+`rb-portless hosts sync`.
 
 To reach an app from another device or share it, use LAN mode (`--lan`) for phones on the
 same network — every running app is then reachable on that network, published over mDNS

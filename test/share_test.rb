@@ -14,12 +14,7 @@ class ShareTest < Minitest::Test
 
   # A spawner running a ruby script whose output we control.
   def script_spawner(code)
-    lambda do |_args|
-      reader, writer = IO.pipe
-      pid = Process.spawn(RbConfig.ruby, "-e", code, out: writer, err: writer)
-      writer.close
-      [ pid, reader ]
-    end
+    ->(_args) { Portless::Tunnel::ChildProcess.new(RbConfig.ruby, [ "-e", code ]) }
   end
 
   # ── ngrok ─────────────────────────────────────────────────────────────
@@ -78,7 +73,7 @@ class ShareTest < Minitest::Test
     pid = nil
     spawner = lambda do |args|
       r = script_spawner("sleep 30").call(args)
-      pid = r.first
+      pid = r.pid
       r
     end
     err = assert_raises(Portless::Error) { T.start_tunnel(T.ngrok, 4000, timeout: 0.3, spawner: spawner) }
@@ -160,14 +155,14 @@ class ShareTest < Minitest::Test
   def test_ensure_ready
     runner, = runner_for
     assert_equal({ dns_name: "box.tail1.ts.net", base_url: "https://box.tail1.ts.net" },
-                 TS.ensure_ready!(require_https: true, runner: runner))
-    err = assert_raises(Portless::Error) { TS.ensure_ready!(require_funnel: true, runner: runner) }
+                 TS.ensure_tailscale_ready(require_https: true, runner: runner))
+    err = assert_raises(Portless::Error) { TS.ensure_tailscale_ready(require_funnel: true, runner: runner) }
     assert_match(%r{Funnel is not enabled.*https://login\.tailscale\.com/f/funnel\?node=n123}, err.message)
     runner, = runner_for(status: { "Self" => { "HostName" => "box" }, "CurrentTailnet" => { "MagicDNSSuffix" => "t.ts.net." } })
-    assert_equal "box.t.ts.net", TS.ensure_ready!(runner: runner)[:dns_name]
-    err = assert_raises(Portless::Error) { TS.ensure_ready!(require_https: true, runner: runner) }
+    assert_equal "box.t.ts.net", TS.ensure_tailscale_ready(runner: runner)[:dns_name]
+    err = assert_raises(Portless::Error) { TS.ensure_tailscale_ready(require_https: true, runner: runner) }
     assert_match(/HTTPS is not enabled/, err.message)
-    err = assert_raises(Portless::Error) { TS.ensure_ready!(runner: ->(_) { { error: Errno::ENOENT.new } }) }
+    err = assert_raises(Portless::Error) { TS.ensure_tailscale_ready(runner: ->(_) { { error: Errno::ENOENT.new } }) }
     assert_match(/Tailscale CLI not found/, err.message)
   end
 
@@ -175,7 +170,7 @@ class ShareTest < Minitest::Test
     serve = { "Web" => { "box:443" => {} }, "TCP" => { "8443" => {} },
               "Foreground" => { "s1" => { "Web" => { "box:8444" => {} } } } }
     runner, = runner_for(serve: serve)
-    assert_equal [ 443, 8443, 8444 ].sort, TS.used_serve_ports(runner).sort
+    assert_equal [ 443, 8443, 8444 ].sort, TS.get_used_serve_ports(runner).to_a.sort
     assert_equal 8445, TS.find_available_serve_port([ 443, 8443, 8444 ])
     assert_equal 10_000, TS.find_available_serve_port([ 443, 8443 ], "funnel")
     assert_raises(Portless::Error) { TS.find_available_serve_port([ 443, 8443, 10_000 ], "funnel") }
@@ -214,7 +209,7 @@ class ShareTest < Minitest::Test
   end
 
   def test_format_url
-    assert_equal "https://box.ts.net", TS.format_url("https://box.ts.net/", 443)
-    assert_equal "https://box.ts.net:8443", TS.format_url("https://box.ts.net", 8443)
+    assert_equal "https://box.ts.net", TS.format_tailscale_url("https://box.ts.net/", 443)
+    assert_equal "https://box.ts.net:8443", TS.format_tailscale_url("https://box.ts.net", 8443)
   end
 end

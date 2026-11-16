@@ -476,6 +476,9 @@ module Portless
           rescue SystemCallError
             next
           end
+        rescue Errno::EPERM
+          # Windows reports a contended mkdir as EPERM; retry it like EEXIST.
+          return false unless Privilege.host_platform == "win32"
         rescue SystemCallError
           return false
         end

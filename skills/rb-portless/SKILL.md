@@ -244,7 +244,9 @@ instead of scraping HTML. Responses from the app itself are forwarded unchanged.
 
 `.localhost` resolves to `127.0.0.1` natively in Chrome, Firefox, and Edge. Safari uses
 the system resolver; rb-portless keeps `/etc/hosts` in sync for route hostnames
-(`PORTLESS_SYNC_HOSTS=0` disables it, `rb-portless hosts sync` runs it by hand).
+(`PORTLESS_SYNC_HOSTS=0` disables it, `rb-portless hosts sync` runs it by hand). If a
+route hostname will not resolve, the command that registered it warns and points you to
+`rb-portless hosts sync`.
 
 `--tld` picks other TLDs, repeated or comma separated (`--tld localhost --tld test`);
 `PORTLESS_URL` uses the first. TLDs can be multi-segment (`dev.example.com`), which strict

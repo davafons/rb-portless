@@ -4,9 +4,8 @@ require_relative "e2e_cli_helper"
 
 # Harness-level checks from upstream tests/e2e/src/harness.ts (startApp +
 # cleanup): proxy start/stop, the `<name> <cmd>` lifecycle with an
-# auto-started proxy, and list/get against the live state. Plus the framework
-# fixture tests (express/hono/vite) when PORTLESS_E2E_NODE_FIXTURES points at
-# a directory holding npm-installed copies of upstream's fixtures.
+# auto-started proxy, and list/get against the live state. The framework
+# fixture tests live in test/upstream/e2e.
 class E2ECliHarnessTest < E2ECliTest
   def test_proxy_start_and_stop
     out, = start_proxy(@env, @proxy_port)
@@ -74,32 +73,5 @@ class E2ECliHarnessTest < E2ECliTest
 
     TEXT
     assert_equal expected, err
-  end
-
-  # name => [fixture dir, command, expected body]
-  FRAMEWORKS = {
-    "express" => [ "express-app", %w[node server.js], "hello from express" ],
-    "hono" => [ "hono-app", %w[node server.js], "hello from hono" ],
-    "vite" => [ "vite-app", %w[vite], "hello from vite" ]
-  }.freeze
-
-  FRAMEWORKS.each do |name, (dir, command, expected)|
-    define_method("test_framework_#{name}_serves_through_the_proxy") do
-      root = ENV["PORTLESS_E2E_NODE_FIXTURES"]
-      skip "set PORTLESS_E2E_NODE_FIXTURES to npm-installed upstream fixtures" unless root
-
-      cwd = File.join(root, dir)
-      skip "#{cwd} missing" unless Dir.exist?(cwd)
-      bin = [ File.join(cwd, "node_modules/.bin", command[0]), File.join(root, "node_modules/.bin", command[0]) ]
-              .find { |path| File.exist?(path) } || command[0]
-      host = "#{name}-test.localhost"
-      child = track(spawn_cli(@env, "#{name}-test", bin, *command.drop(1), chdir: cwd))
-      assert wait_for_app(@proxy_port, host, timeout: 60), child.logs
-      route = read_routes(@state_dir).find { |r| r["hostname"] == host }
-      @app_ports << route["port"] if route
-      status, body, = request(@proxy_port, host)
-      assert_equal 200, status
-      assert_includes body, expected
-    end
   end
 end

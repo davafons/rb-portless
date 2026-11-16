@@ -33,7 +33,7 @@ class CleanTest < Minitest::Test
   def clean(stop: true, service: { removed: false, installed: false }, untrust: { removed: true })
     code = nil
     out, err = capture_io do
-      Portless::Service.stub(:try_uninstall, service) do
+      Portless::Service.stub(:try_uninstall_service, service) do
         Portless::Daemon.stub(:discover_state, state) do
           Portless::Daemon.stub(:stop_proxy, stop) do
             Portless::Health.stub(:proxy_running?, false) do
@@ -124,7 +124,7 @@ class CleanTest < Minitest::Test
     assert_equal 1, code
     assert_includes out, "Removing the startup service requires elevated privileges. Requesting sudo..."
     assert_includes err, "Failed to remove startup service with sudo."
-    assert_equal Portless::Service.uninstall_sudo_args, seen
+    assert_equal Portless::Service.build_service_uninstall_sudo_args, seen
     assert_equal 1, seen.count("env")
   end
 

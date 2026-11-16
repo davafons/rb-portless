@@ -133,15 +133,18 @@ module Portless
 
     # Does anything accept TCP connections on either loopback? cli-utils.ts
     # isPortListening.
+    # Both loopbacks are raced; an unfinished probe is cancelled at the deadline.
     def port_listening?(port, timeout: SOCKET_TIMEOUT)
-      %w[127.0.0.1 ::1].any? { |host| connectable?(host, port, timeout) }
-    end
+      result = Queue.new
+      cancel = Utils.create_loopback_connection(port) do |error, socket|
+        socket&.close
+        result << error.nil?
+      end
+      listening = result.pop(timeout: timeout)
+      return listening unless listening.nil?
 
-    def connectable?(host, port, timeout)
-      TCPSocket.new(host, port, connect_timeout: timeout).close
-      true
-    rescue StandardError
-      false
+      cancel.call
+      result.pop
     end
 
     def linux? = RbConfig::CONFIG["host_os"].match?(/linux/i)

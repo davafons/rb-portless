@@ -7,10 +7,10 @@ class ServiceTest < Minitest::Test
   S = Portless::Service
   ENTRY = [ "/usr/bin/ruby", "-I", "/gem/lib", "/gem/exe/rb-portless" ].freeze
 
-  def parse(*args, env: {}) = S.parse_install_config([ "service", "install", *args ], env)
+  def parse(*args, env: {}) = S.parse_service_install_config([ "service", "install", *args ], env)
 
-  def spec(platform, config = {}) = S.build_spec(platform: platform, entry_argv: ENTRY, user_home: "/Users/dev",
-                                                 uid: "501", gid: "20", install_config: config)
+  def spec(platform, config = {}) = S.build_service_spec(platform: platform, node_path: ENTRY[0], entry_script: ENTRY.drop(1),
+                                                         user_home: "/Users/dev", uid: "501", gid: "20", install_config: config)
 
   def test_defaults
     c = parse
@@ -50,7 +50,7 @@ class ServiceTest < Minitest::Test
     assert_raises(Portless::UsageError) { parse("-p", "70000") }
     assert_raises(Portless::UsageError) { parse("--https=1") }
     assert_raises(Portless::UsageError) { parse("extra") }
-    assert_raises(Portless::UsageError) { S.handle(%w[service frobnicate]) }
+    assert_raises(Portless::UsageError) { S.handle_service(%w[service frobnicate]) }
   end
 
   def test_launchd_plist_carries_flags_and_env
@@ -90,7 +90,7 @@ class ServiceTest < Minitest::Test
   end
 
   def test_uninstall_sudo_args
-    args = S.uninstall_sudo_args(home: "/Users/dev", env: { "PORTLESS_TLD" => "test", "PORTLESS_STATE_DIR" => "/x" })
+    args = S.build_service_uninstall_sudo_args(home: "/Users/dev", env: { "PORTLESS_TLD" => "test", "PORTLESS_STATE_DIR" => "/x" })
     assert_equal [ "env", "PORTLESS_TLD=test", "HOME=/Users/dev", "PORTLESS_STATE_DIR=/x" ], args.first(4)
     assert_equal %w[service uninstall], args.last(2)
   end

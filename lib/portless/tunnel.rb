@@ -130,18 +130,46 @@ module Portless
     # Contract entry point: verify the provider CLI before the proxy starts.
     def check!(name, runner = nil) = ensure_available(provider_for(name), runner)
 
+    # The default tunnel child: the provider CLI with stdout and stderr piped.
+    # A spawner may return any object with the same shape (pid, stdout,
+    # stderr, kill(signal), wait → [code, signal]). tunnel.ts TunnelChildProcess.
+    class ChildProcess
+      attr_reader :pid, :stdout, :stderr
+
+      def initialize(binary, args)
+        @stdout, out_w = IO.pipe
+        @stderr, err_w = IO.pipe
+        @pid = Process.spawn(binary, *args, in: File::NULL, out: out_w, err: err_w)
+      ensure
+        out_w&.close
+        err_w&.close
+      end
+
+      def kill(signal)
+        Process.kill(signal.to_s.delete_prefix("SIG"), @pid)
+        true
+      end
+
+      def wait
+        _, status = Process.wait2(@pid)
+        [ status.exitstatus, status.termsig && "SIG#{Signal.signame(status.termsig)}" ]
+      end
+    end
+
     # A running tunnel process.
     class Handle
       attr_accessor :url
-      attr_reader :pid
+      attr_reader :child
 
-      def initialize(url, pid)
+      def initialize(url, child)
         @url = url
-        @pid = pid
+        @child = child
         @exit_callbacks = []
         @exit_status = nil
         @mutex = Mutex.new
       end
+
+      def pid = @child.pid
 
       def on_exit(&block)
         status = @mutex.synchronize do
@@ -163,30 +191,28 @@ module Portless
       def exited? = !@exit_status.nil?
 
       def stop
-        Process.kill("TERM", @pid) if @pid && !exited?
-      rescue StandardError
-        nil
+        Tunnel.stop_ngrok_process(@child) unless exited?
       end
     end
 
     # Spawn the provider and wait for its public URL. tunnel.ts startTunnel.
-    # opts: host_header:, timeout:, spawner: ->(args) { [pid, io] }. Raises
-    # Portless::Error. A block is registered as the exit callback.
+    # opts: host_header:, timeout: (seconds), spawner: ->(args) { child }.
+    # Raises Portless::Error. A block is registered as the exit callback.
     def start_tunnel(provider, local_port, timeout: START_TIMEOUT, spawner: nil, **opts, &on_exit)
       args = provider.build_args.call(local_port, opts)
       begin
-        pid, io = (spawner || method(:default_spawner).curry[provider.binary]).call(args)
+        child = (spawner || ->(a) { ChildProcess.new(provider.binary, a) }).call(args)
       rescue SystemCallError => e
         raise format_spawn_error(provider, e)
       end
 
       queue = Queue.new
       output = +""
+      lock = Mutex.new
       started = false
-      handle = Handle.new(nil, pid)
-      reader = Thread.new do
-        loop do
-          chunk = io.readpartial(4096)
+      handle = Handle.new(nil, child)
+      append_output = lambda do |chunk|
+        lock.synchronize do
           next if started
 
           output << chunk
@@ -197,15 +223,18 @@ module Portless
             queue << [ :url, url ]
           end
         end
-      rescue EOFError, IOError
-        nil
+      end
+      readers = [ child.stdout, child.stderr ].compact.map do |io|
+        Thread.new do
+          loop { append_output.call(io.readpartial(4096)) }
+        rescue EOFError, IOError
+          nil
+        end
       end
       Thread.new do
-        _, status = Process.wait2(pid)
-        reader.join(1)
-        code = status&.exitstatus
-        signal = status&.termsig && "SIG#{Signal.signame(status.termsig)}"
-        if started
+        code, signal = child.wait
+        readers.each { |r| r.join(1) }
+        if lock.synchronize { started }
           handle.exited(code, signal)
         else
           queue << [ :exit, code, signal ]
@@ -214,11 +243,10 @@ module Portless
         queue << [ :exit, nil, nil ]
       end
 
-      event = begin
-        Timeout.timeout(timeout) { queue.pop }
-      rescue Timeout::Error
+      event = queue.pop(timeout: timeout)
+      unless event
         begin
-          Process.kill("TERM", pid)
+          child.kill("SIGTERM")
         rescue StandardError
           nil
         end
@@ -241,11 +269,13 @@ module Portless
       end
     end
 
-    def default_spawner(binary, args)
-      reader, writer = IO.pipe
-      pid = Process.spawn(binary, *args, in: File::NULL, out: writer, err: writer)
-      writer.close
-      [ pid, reader ]
+    # tunnel.ts stopNgrokProcess.
+    def stop_ngrok_process(child)
+      return unless child
+
+      child.kill("SIGTERM")
+    rescue StandardError
+      nil
     end
 
     # Contract entry point. → Handle (#url, #pid, #stop, #on_exit)
@@ -260,6 +290,8 @@ module Portless
     end
 
     def start_ngrok(local_port, **opts, &on_exit) = start_tunnel(ngrok, local_port, **opts, &on_exit)
+
+    def ensure_ngrok_available(runner = nil) = ensure_available(ngrok, runner)
 
     def stop_pid(pid)
       return unless pid

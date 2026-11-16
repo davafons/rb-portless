@@ -224,7 +224,7 @@ module Portless
     private
 
     def ensure_tailscale_ready(funnel)
-      Share::Tailscale.ensure_ready!(require_funnel: funnel, require_https: true)[:base_url]
+      Share::Tailscale.ensure_tailscale_ready(require_funnel: funnel, require_https: true)[:base_url]
     rescue Error => e
       warn Colors.red("Error: #{e.message}", io: $stderr)
       if e.message.include?("not found")

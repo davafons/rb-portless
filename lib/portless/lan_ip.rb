@@ -42,9 +42,11 @@ module Portless
       false
     end
 
-    # [{iname:, address:, mac:, internal:}] for every IPv4 interface address,
-    # with the MAC taken from the interface's link-layer entry.
-    def interfaces
+    def ipv4_family?(family) = family == "IPv4" || family == 4
+
+    # {iname => [{address:, family:, mac:, internal:}]}, shaped like Node's
+    # os.networkInterfaces(), with the MAC taken from the link-layer entry.
+    def network_interfaces
       ifaddrs = Socket.getifaddrs
       macs = {}
       ifaddrs.each do |ifa|
@@ -54,14 +56,27 @@ module Portless
         mac = ifa.addr.inspect_sockaddr[/(?:[0-9a-f]{2}:){5}[0-9a-f]{2}/i]
         macs[ifa.name] = mac if mac
       end
-      ifaddrs.filter_map do |ifa|
-        next unless ifa.addr&.ipv4?
+      ifaddrs.each_with_object({}) do |ifa, ifs|
+        next unless ifa.addr&.ipv4? || ifa.addr&.ipv6?
 
-        { iname: ifa.name, address: ifa.addr.ip_address, mac: macs[ifa.name] || "00:00:00:00:00:00",
-          internal: ifa.flags.anybits?(Socket::IFF_LOOPBACK) }
+        (ifs[ifa.name] ||= []) << {
+          address: ifa.addr.ip_address, family: ifa.addr.ipv4? ? "IPv4" : "IPv6",
+          mac: macs[ifa.name] || "00:00:00:00:00:00", internal: ifa.flags.anybits?(Socket::IFF_LOOPBACK)
+        }
       end
     rescue StandardError
-      []
+      {}
+    end
+
+    # [{iname:, address:, mac:, internal:}] for every IPv4 interface address.
+    def interfaces
+      network_interfaces.flat_map do |iname, entries|
+        Array(entries).filter_map do |e|
+          next unless ipv4_family?(e[:family])
+
+          { iname: iname, address: e[:address], mac: e[:mac], internal: e[:internal] }
+        end
+      end
     end
 
     def find_interface_row_for_ip(ip, rows = interfaces)

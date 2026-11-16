@@ -1348,10 +1348,16 @@ module Portless
       "#{hostnames.join(', ')} will not resolve. Run: rb-portless hosts sync"
     end
 
-    def http_for(port, tls)
+    # One deadline shared by every request of a trigger (AbortSignal.timeout).
+    def http_for(port, tls, deadline)
+      remaining = deadline - monotonic
+      raise Net::ReadTimeout, "hosts sync deadline" unless remaining.positive?
+
       http = Net::HTTP.new("127.0.0.1", port)
-      http.open_timeout = HOSTS_SYNC_TRIGGER_TIMEOUT
-      http.read_timeout = HOSTS_SYNC_TRIGGER_TIMEOUT
+      http.open_timeout = remaining
+      http.read_timeout = remaining
+      http.write_timeout = remaining
+      http.ssl_timeout = remaining
       if tls
         http.use_ssl = true
         http.verify_mode = OpenSSL::SSL::VERIFY_NONE
@@ -1362,8 +1368,8 @@ module Portless
     def absent_error?(error) = error.is_a?(Errno::ECONNREFUSED) || error.is_a?(SocketError)
 
     # :available | :absent | :mute
-    def probe_hosts_sync_auth(port, tls, token, challenge)
-      res = http_for(port, tls).start do |h|
+    def probe_hosts_sync_auth(port, tls, token, challenge, deadline = monotonic + HOSTS_SYNC_TRIGGER_TIMEOUT)
+      res = http_for(port, tls, deadline).start do |h|
         h.head("/", HostsSyncAuth::HOSTS_SYNC_AUTH_CHALLENGE_HEADER => challenge)
       end
       expected = token ? HostsSyncAuth.create_proof(token, challenge) : nil
@@ -1378,13 +1384,14 @@ module Portless
     # Ask the running proxy to sync the hosts file now. → :acted | :absent |
     # :disabled | :mute. cli-utils.ts triggerHostsSync.
     def trigger_hosts_sync(port, tls = false, state_dir = State.dir)
+      deadline = monotonic + HOSTS_SYNC_TRIGGER_TIMEOUT
       token = HostsSyncAuth.read_token(state_dir)
       challenge = HostsSyncAuth.generate_challenge
-      capability = probe_hosts_sync_auth(port, tls, token, challenge)
+      capability = probe_hosts_sync_auth(port, tls, token, challenge, deadline)
       return capability unless capability == :available
       return :mute unless token
 
-      res = http_for(port, tls).start do |h|
+      res = http_for(port, tls, deadline).start do |h|
         h.post(HOSTS_SYNC_PATH, "", HostsSyncAuth::HOSTS_SYNC_AUTH_HEADER => token)
       end
       case res.code.to_i

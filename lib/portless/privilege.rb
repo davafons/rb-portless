@@ -35,6 +35,21 @@ module Portless
       end
     end
 
+    # Bind and listen on one proxy target (loopback unless LAN/unprivileged
+    # mode picked the unspecified addresses). cli-utils.ts listenOnProxyInterface.
+    def listen_on_proxy_interface(port, target)
+      addr = Addrinfo.tcp(target[:host], port)
+      socket = Socket.new(addr.afamily, Socket::SOCK_STREAM, 0)
+      socket.setsockopt(Socket::SOL_SOCKET, Socket::SO_REUSEADDR, true)
+      socket.setsockopt(Socket::IPPROTO_IPV6, Socket::IPV6_V6ONLY, true) if target[:ipv6_only]
+      socket.bind(addr)
+      socket.listen(Socket::SOMAXCONN)
+      socket
+    rescue StandardError
+      socket&.close
+      raise
+    end
+
     # May this process bind `port` on every target without root? false only on
     # EACCES/EPERM; anything else (EADDRINUSE…) is left for the real listen.
     # cli-utils.ts canBindProxyPort.

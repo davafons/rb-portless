@@ -115,11 +115,19 @@ class ProxyTest < Minitest::Test
     conn.start { |c| c.request(request) }
   end
 
+  # Writes `data` and reads until the proxy closes (or 2 s pass). The write
+  # side stays open: like Node, the proxy treats a client FIN as the client
+  # going away.
   def raw(port, data)
     s = TCPSocket.new("127.0.0.1", port, connect_timeout: 2)
     s.write(data)
-    s.close_write
-    s.read
+    out = +""
+    while s.wait_readable(2) && (chunk = s.read_nonblock(65_536, exception: false))
+      out << chunk unless chunk == :wait_readable
+    end
+    out
+  rescue Errno::ECONNRESET
+    out
   ensure
     s&.close
   end
@@ -173,7 +181,7 @@ class ProxyTest < Minitest::Test
     assert_includes body, "x-forwarded-port: #{port}"
     assert_includes body, "x-forwarded-prefix: /p"
     assert_includes body, "x-portless-hops: 1"
-    refute_match(/^connection: keep-alive/, body)
+    assert_equal 1, body.scan(/^connection: keep-alive/).size # the pooled agent's own, not the client's
   end
 
   def test_incoming_forwarded_headers_pass_through

@@ -2,6 +2,7 @@
 
 require "json"
 require "open3"
+require "set"
 require "timeout"
 
 module Portless
@@ -30,10 +31,21 @@ module Portless
       def default_runner(args)
         stdout, stderr, status = Timeout.timeout(COMMAND_TIMEOUT) { Open3.capture3(BINARY, *args) }
         { status: status.exitstatus, stdout: stdout, stderr: stderr }
-      rescue Timeout::Error => e
-        { status: nil, stdout: "", stderr: "", error: e }
+      rescue Timeout::Error
+        { status: nil, stdout: "", stderr: "", error: Errno::ETIMEDOUT.new("spawnSync #{BINARY}") }
       rescue SystemCallError => e
         { status: nil, stdout: "", stderr: "", error: e }
+      end
+
+      # Resolve an existing Windows `.cmd` shim on PATH. tailscale.ts findWindowsCmdShim.
+      def find_windows_cmd_shim(name, env = ENV)
+        (env["PATH"] || env["Path"] || "").split(File::PATH_SEPARATOR).each do |dir|
+          next if dir.empty?
+
+          candidate = File.join(dir, "#{name}.cmd")
+          return candidate if File.file?(candidate)
+        end
+        nil
       end
 
       def normalize_space(value) = value.to_s.strip.gsub(/\s+/, " ")
@@ -91,7 +103,7 @@ module Portless
 
       # Verify the CLI and connection → {dns_name:, base_url:}. Raises Error.
       # tailscale.ts ensureTailscaleReady.
-      def ensure_ready!(require_funnel: false, require_https: false, runner: method(:default_runner))
+      def ensure_tailscale_ready(require_funnel: false, require_https: false, runner: method(:default_runner))
         run_or_throw([ "version" ], "check tailscale version", runner)
         status = parse_status_json(run_or_throw([ "status", "--json" ], "read tailscale status", runner)[:stdout])
         dns_name = status_to_dns_name(status)
@@ -109,13 +121,13 @@ module Portless
       end
 
       # HTTPS ports in use by serve/funnel, incl. Foreground sessions (#499).
-      def used_serve_ports(runner = method(:default_runner))
+      def get_used_serve_ports(runner = method(:default_runner)) # rubocop:disable Naming/AccessorMethodName
         result = runner.call([ "serve", "status", "--json" ])
-        return [] if result[:error] || result[:status] != 0
+        return Set.new if result[:error] || result[:status] != 0
 
         config = JSON.parse(result[:stdout])
         sessions = [ config, *(config["Foreground"].is_a?(Hash) ? config["Foreground"].values : []) ]
-        ports = []
+        ports = Set.new
         sessions.each do |session|
           next unless session.is_a?(Hash)
 
@@ -127,9 +139,9 @@ module Portless
             ports << p if p
           end
         end
-        ports.uniq
+        ports
       rescue StandardError
-        []
+        Set.new
       end
 
       def find_available_serve_port(used, mode = "serve")
@@ -168,7 +180,7 @@ module Portless
           if mode == "funnel" && funnel_not_enabled_error?(result[:stderr], result[:stdout])
             raise Error, format_funnel_not_enabled_error(result[:stderr], result[:stdout])
           end
-          if mode == "funnel" && result[:error].is_a?(Timeout::Error)
+          if mode == "funnel" && result[:error].is_a?(Errno::ETIMEDOUT)
             raise Error, "Tailscale Funnel registration timed out. Make sure Funnel is enabled on your tailnet, " \
                          "then run rb-portless again."
           end
@@ -207,6 +219,22 @@ module Portless
                      "#{details.empty? ? 'unknown tailscale error' : details}"
       end
 
+      def register_serve(local_port, https_port, runner: method(:default_runner))
+        register("serve", local_port, https_port, runner)
+      end
+
+      def register_funnel(local_port, https_port, runner: method(:default_runner))
+        register("funnel", local_port, https_port, runner)
+      end
+
+      def unregister_serve(https_port, ignore_missing: false, runner: method(:default_runner))
+        unregister("serve", https_port, ignore_missing: ignore_missing, runner: runner)
+      end
+
+      def unregister_funnel(https_port, ignore_missing: false, runner: method(:default_runner))
+        unregister("funnel", https_port, ignore_missing: ignore_missing, runner: runner)
+      end
+
       # Best-effort teardown from route metadata — only the registration that
       # was recorded (tailscaleHttpsPort + tailscaleFunnel). Accepts a route
       # object/hash or keywords. tailscale.ts unregisterTailscale.
@@ -227,7 +255,7 @@ module Portless
 
       def camel(name) = name.to_s.gsub(/_([a-z])/) { Regexp.last_match(1).upcase }
 
-      def format_url(base_url, https_port)
+      def format_tailscale_url(base_url, https_port)
         trimmed = base_url.end_with?("/") ? base_url[0...-1] : base_url
         https_port == 443 ? trimmed : "#{trimmed}:#{https_port}"
       end
@@ -246,10 +274,10 @@ module Portless
       # Upstream runApp's registration loop: pick a free port, retry up to 3×
       # on a port conflict. Raises Error. → Handle
       def start(app_port:, funnel: false, base_url: nil, runner: method(:default_runner), max_attempts: 3)
-        base_url ||= ensure_ready!(require_funnel: funnel, require_https: true, runner: runner)[:base_url]
+        base_url ||= ensure_tailscale_ready(require_funnel: funnel, require_https: true, runner: runner)[:base_url]
         https_port = nil
         (1..max_attempts).each do |attempt|
-          https_port = find_available_serve_port(used_serve_ports(runner), funnel ? "funnel" : "serve")
+          https_port = find_available_serve_port(get_used_serve_ports(runner), funnel ? "funnel" : "serve")
           begin
             register(funnel ? "funnel" : "serve", app_port, https_port, runner)
             break
@@ -257,7 +285,7 @@ module Portless
             raise unless e.message.include?("already in use") && attempt < max_attempts
           end
         end
-        Handle.new(format_url(base_url, https_port), https_port, funnel, runner)
+        Handle.new(format_tailscale_url(base_url, https_port), https_port, funnel, runner)
       end
     end
   end

@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "socket"
+
 module Portless
   # Pure helpers shared by the CLI, proxy pages and daemon: port/URL/hostname
   # parsing and the TLD rules. Mirrors portless's utils.ts (parsePort,
@@ -49,6 +51,40 @@ module Portless
     # `new RouteStore(dir, { onWarning: (msg) => console.warn(colors.yellow(msg)) })`).
     def new_route_store(dir)
       RouteStore.new(dir, on_warning: ->(msg) { warn Colors.yellow(msg, io: $stderr) })
+    end
+
+    LOOPBACK_HOSTS = [ "127.0.0.1", "::1" ].freeze
+
+    # Race both literal loopback addresses and hand the first connected socket
+    # to the block (`error` nil). Returns a cancel lambda that aborts pending
+    # attempts with ECANCELED (upstream: ABORT_ERR). utils.ts
+    # createLoopbackConnection.
+    def create_loopback_connection(port, &callback)
+      lock = Mutex.new
+      settled = false
+      errors = []
+      attempts = []
+      finish = lambda do |error, socket = nil|
+        won = lock.synchronize { settled ? false : (settled = true) }
+        next false unless won
+
+        attempts.each { |thread| thread.kill unless thread == Thread.current }
+        callback.call(error, socket)
+        true
+      end
+      LOOPBACK_HOSTS.each_with_index do |host, index|
+        attempts << Thread.new do
+          socket = Socket.tcp(host, port)
+          socket.close unless finish.call(nil, socket)
+        rescue StandardError => e
+          both = lock.synchronize do
+            errors[index] = e
+            errors.compact.size == LOOPBACK_HOSTS.size
+          end
+          finish.call(errors[0]) if both
+        end
+      end
+      -> { finish.call(Errno::ECANCELED.new("The operation was aborted")) }
     end
 
     def parse_port(value)
