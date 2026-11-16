@@ -52,7 +52,8 @@ class LanTest < Minitest::Test
     monitor = M.start_lan_ip_monitor(initial_ip: "10.0.0.2", interval: 0.01,
                                      resolve_ip: -> { values.size > 1 ? values.shift : values.first },
                                      on_change: ->(n, p) { changes << [ n, p ] })
-    sleep 0.2
+    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 5
+    sleep 0.01 while changes.size < 3 && Process.clock_gettime(Process::CLOCK_MONOTONIC) < deadline
     monitor.stop
     assert_equal [ [ "10.0.0.3", "10.0.0.2" ], [ nil, "10.0.0.3" ], [ "10.0.0.4", nil ] ], changes
   end

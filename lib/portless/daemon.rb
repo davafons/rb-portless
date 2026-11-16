@@ -1399,6 +1399,10 @@ module Portless
       res = http_for(port, tls, deadline).start do |h|
         h.post(HOSTS_SYNC_PATH, "", HostsSyncAuth::HOSTS_SYNC_AUTH_HEADER => token)
       end
+      # A late wakeup (macOS timer coalescing) can deliver an answer past the
+      # read timeout; the 500 ms budget is shared, so past it means no answer.
+      return :mute if monotonic > deadline
+
       case res.code.to_i
       when 204 then :acted
       when 409 then :disabled
