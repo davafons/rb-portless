@@ -212,13 +212,13 @@ describe "isPortListening" do
         callback.call(Errno::ECANCELED.new("Cancelled"), nil)
       end
     end
-    threads_before = Thread.list.size
+    threads_before = Thread.list
     Portless::Utils.stub(:create_loopback_connection, connect) do
       started = monotonic_ms
       assert_equal false, Portless::PortOwner.port_listening?(19_877)
       assert_operator monotonic_ms - started, :>=, 500
       assert_equal 1, cancel_calls
-      assert_equal threads_before, Thread.list.size
+      assert_empty Thread.list.select(&:alive?) - threads_before # no timer thread left behind
     end
   end
 end
