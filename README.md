@@ -42,7 +42,7 @@ installed side by side:
 gem install rb-portless
 ```
 
-Ruby 3.2 or later, on macOS or Linux.
+Ruby 3.3 or later, on macOS or Linux.
 
 ## Quick start
 

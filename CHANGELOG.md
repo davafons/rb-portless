@@ -18,6 +18,10 @@ markers, service ids) so both tools can be installed side by side, plus
 
 ### Breaking
 
+- **Ruby 3.3 or later** is required (Ruby 3.2 is end-of-life, and the async-http
+  releases rb-portless needs no longer support it), with async 2.46+ and
+  async-http 0.105+ (older releases hang WebSocket-over-HTTP/2 tunnels to HTTPS
+  backends on Linux).
 - **Rails railtie removed** (`require "portless/rails"`). Allow `*.localhost`
   in `config.hosts` yourself.
 - **Routing is strict by default.** An unregistered subdomain now gets a 404.

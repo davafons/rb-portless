@@ -17,7 +17,7 @@ Gem::Specification.new do |spec|
   DESC
   spec.homepage = "https://github.com/davafons/rb-portless"
   spec.license = "MIT"
-  spec.required_ruby_version = ">= 3.2"
+  spec.required_ruby_version = ">= 3.3"
 
   spec.metadata["source_code_uri"] = spec.homepage
   spec.metadata["changelog_uri"] = "#{spec.homepage}/blob/main/CHANGELOG.md"
@@ -31,6 +31,11 @@ Gem::Specification.new do |spec|
 
   # async-http gives HTTP/1.1 + HTTP/2 + TLS + WebSockets natively — the Ruby
   # equivalent of the Node http2 server portless builds on.
-  spec.add_dependency "async", "~> 2.0"
-  spec.add_dependency "async-http", "~> 0.80"
+  # Minimums are the versions the suite runs against: the proxy relies on
+  # Protocol::HTTP::RefusedError and protocol-http1's maximum_line_length.
+  # Older async/async-http hang HTTP/2 WebSocket tunnels to TLS backends on Linux.
+  spec.add_dependency "async", ">= 2.46", "< 3"
+  spec.add_dependency "async-http", ">= 0.105", "< 1"
+  spec.add_dependency "protocol-http", ">= 0.72", "< 1"
+  spec.add_dependency "protocol-http1", ">= 0.41", "< 1"
 end
