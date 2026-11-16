@@ -25,6 +25,11 @@ Deliberate divergences (naming only, so both tools coexist):
   trust sibling `.localhost` HTTPS apps.
 - The child runs in `Bundler.unbundled_env` (plumbing, not a feature).
 
+Known limits of the async-http stack (not choices; don't "fix" them by hand-rolling HTTP):
+empty responses carry `content-length: 0` and no `connection: keep-alive`; a rejected
+WebSocket upgrade gets async-http's own `connection: close` instead of the backend's;
+"socket hang up" is ECONNRESET/EPIPE/EOF/`Protocol::HTTP::RefusedError`.
+
 Not ported (yet): Windows CA trust + Task Scheduler service, the legacy `/tmp/portless`
 state migration.
 
@@ -89,7 +94,9 @@ Only claim an upstream version once its features are in.
 ## Conventions
 
 - Stdlib-first; runtime deps are `async` + `async-http` (h1/h2/TLS/WebSocket).
-- Minitest in `test/`; isolate state via `PORTLESS_STATE_DIR`. Port upstream's unit tests
+- Minitest in `test/`. `test_helper.rb` points `HOME` and `PORTLESS_STATE_DIR` at a temp
+  dir and puts shims for `security`/`sudo`/`certutil` first on `PATH`, so no test can touch
+  `~/.rb-portless`, the keychain, or `/etc/hosts`. Never undo that in a test. Port upstream's unit tests
   alongside the code. The e2e layer (`test/e2e_helper.rb`) runs the real daemon on a
   free high port with `--skip-trust` and `PORTLESS_SYNC_HOSTS=0` (no sudo, no keychain,
   no `/etc/hosts`).

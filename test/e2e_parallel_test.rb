@@ -15,6 +15,7 @@ class E2EParallelTest < E2ECliTest
     apps = Array.new(APP_COUNT) do |i|
       name = "parallel-app-#{i}"
       app_port = free_port
+      app_port = free_port while @app_ports.include?(app_port)
       @app_ports << app_port
       child = track(spawn_cli(@env.merge("APP_NAME" => name), name, "--app-port", app_port,
                               RbConfig.ruby, "server.rb", chdir: fixture("minimal-server")))
